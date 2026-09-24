@@ -340,6 +340,8 @@ ROMANIZED_HINDI_TERMS = {
     "dinesh": ["दिनेश"],
     "mahesh": ["महेश"],
     "suresh": ["सुरेश"],
+    "bhonu": ["भोनू"],
+    "bhonoo": ["भोनू"],
     "ramesh": ["रमेश"],
     "sunita": ["सुनीता"],
     "geeta": ["गीता"],
@@ -351,6 +353,14 @@ ROMANIZED_HINDI_TERMS = {
 
 
 RELATION_WORDS = "wife|husband|father|mother|son|daughter"
+RELATION_TYPE_BY_WORD = {
+    "father": "Father",
+    "mother": "Mother",
+    "husband": "Husband",
+    "wife": "Husband",
+    "son": "Father",
+    "daughter": "Father",
+}
 
 
 def _roman_tokens(text: str) -> List[str]:
@@ -379,19 +389,33 @@ def _extract_house_no(question: str) -> Optional[str]:
     return None
 
 
-def _extract_person_and_relative(question: str) -> Tuple[str, str]:
+def _extract_person_and_relative(question: str) -> Tuple[str, str, Optional[str]]:
     text = question or ""
+    relative_name_match = re.search(
+        rf"^\s*(?:find|search(?:\s+for)?|look\s+for)?\s*(.*?)\s*,?\s*"
+        rf"(?:whose\s+)?(?:relative\s+)?({RELATION_WORDS})(?:'s)?\s+name\s+"
+        rf"(?:is|=)\s+([a-zA-Z ]+?)(?=\s+\b(?:house|search|in|at|from)\b|[.,;]|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if relative_name_match:
+        person = relative_name_match.group(1).strip(" .,;:-")
+        relation_word = relative_name_match.group(2).lower()
+        relative = relative_name_match.group(3).strip(" .,;:-")
+        return person, relative, RELATION_TYPE_BY_WORD.get(relation_word)
+
     relation_match = re.search(
         rf"\b({RELATION_WORDS})\s+of\s+([a-zA-Z ]+?)(?=\s+\b(?:house|search|in|at|from)\b|[.,;]|$)",
         text,
         flags=re.IGNORECASE,
     )
     if not relation_match:
-        return text, ""
+        return text, "", None
 
     person = text[: relation_match.start()].strip(" .,;:-")
+    relation_word = relation_match.group(1).lower()
     relative = relation_match.group(2).strip(" .,;:-")
-    return person, relative
+    return person, relative, RELATION_TYPE_BY_WORD.get(relation_word)
 
 
 def _format_voter_rows(rows: List[Dict[str, Any]], question: str) -> str:
@@ -440,12 +464,14 @@ def try_direct_voter_lookup(question: str, slug: str) -> Optional[str]:
     if not re.search(r"\b(search|find|voter|electoral|db|house|wife|husband|father|mother|son|daughter)\b", question or "", flags=re.IGNORECASE):
         return None
 
-    person_phrase, relative_phrase = _extract_person_and_relative(question)
+    person_phrase, relative_phrase, relation_type = _extract_person_and_relative(question)
     person_terms = _hindi_terms_from_phrase(person_phrase)
     relative_terms = _hindi_terms_from_phrase(relative_phrase)
     house_no = _extract_house_no(question)
 
     if not person_terms and not relative_terms:
+        return None
+    if relative_phrase and not relative_terms:
         return None
 
     conditions = []
@@ -459,6 +485,9 @@ def try_direct_voter_lookup(question: str, slug: str) -> Optional[str]:
     if house_no:
         conditions.append("TRIM(CAST(house_no AS TEXT)) = ?")
         params.append(house_no)
+    if relation_type:
+        conditions.append("relation_type = ?")
+        params.append(relation_type)
 
     sql = """
         SELECT serial_no, name, relative_name, relation_type, house_no, age, gender,
