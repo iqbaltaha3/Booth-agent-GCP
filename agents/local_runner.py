@@ -296,6 +296,23 @@ def clean_user_answer(answer: str, question: str) -> str:
 
     text = "\n".join(lines).strip()
     text = re.sub(r"\n{3,}", "\n\n", text)
+    total_voter_question = (
+        re.search(r"\btotal\b", question or "", flags=re.IGNORECASE)
+        and re.search(r"\bvoters?\b", question or "", flags=re.IGNORECASE)
+    ) or bool(re.search(r"कुल.*मतदाता|मतदाता.*कुल", question or ""))
+    if total_voter_question:
+        match = re.search(r"([\d,]+)\s+(?:total\s+)?voters?", text, flags=re.IGNORECASE)
+        if match:
+            count = match.group(1)
+            if wants_hindi(question):
+                return (
+                    f"कुल मतदाता: {count}\n"
+                    "यह चयनित विधानसभा क्षेत्र की मतदाता सूची में दर्ज कुल मतदाताओं की संख्या है।"
+                )
+            return (
+                f"Total voters: {count}\n"
+                "This is the total number of voters recorded for the selected constituency."
+            )
     return text
 
 
