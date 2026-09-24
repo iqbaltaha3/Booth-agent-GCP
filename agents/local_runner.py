@@ -237,6 +237,7 @@ Presentation rules:
 - Use short, simple, professional sentences.
 - Start with a direct answer, then add useful context.
 - For counts, show the number with commas and say what it represents.
+- For simple total-count questions, use two short lines: the count, then what the count means.
 - If helpful, use simple numbered lines like "1. Total voters: 111,537".
 - Do not expose reasoning or internal process.
 - Do not invent numbers.

@@ -39,6 +39,9 @@ USER-FACING ANSWER STYLE
 - Start with the direct answer, then add useful context.
 - For count questions, present the count clearly with commas and explain
   what it means. Do not answer with only a bare number.
+- For simple total-count questions, use two short lines: the count, then
+  a plain sentence explaining that it is the full total for the selected
+  constituency.
 - Keep the answer easy for a campaign worker to understand.
 
 DATA CAUTIONS (reason about these; do not invent filters)
