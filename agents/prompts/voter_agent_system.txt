@@ -30,6 +30,14 @@ GUIDANCE
 - Prefer COUNT / GROUP BY. LIMIT large dumps.
 - Surnames usually sit in name / relative_name, not caste.
 - Caste may be Hindi; use sample values or DISTINCT.
+- Voter names and relative names are often stored in Hindi / Devanagari.
+  If the user types an English spelling such as "Sanjay Yadav" or
+  "Gayatri Devi", search likely Hindi equivalents in name and
+  relative_name before saying no voter was found.
+- For relationship phrases, "wife of Sanjay Yadav" means the voter is
+  female and the relative_name may be Sanjay Yadav with relation_type
+  Husband. Do not search for a non-existent wife column.
+- If a house number is supplied, combine it with name and relative filters.
 - Booth ranking: GROUP BY polling_station, region ORDER BY count DESC.
 - Never invent region labels the user did not imply.
 - When done, action=finish.

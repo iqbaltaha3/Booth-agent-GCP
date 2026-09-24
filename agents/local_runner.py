@@ -318,6 +318,170 @@ def clean_user_answer(answer: str, question: str) -> str:
     return text
 
 
+ROMANIZED_HINDI_TERMS = {
+    "gayatri": ["गायत्री"],
+    "gyatri": ["गायत्री"],
+    "gaytri": ["गायत्री"],
+    "devi": ["देवी"],
+    "sanjay": ["संजय"],
+    "sanjai": ["संजय"],
+    "yadav": ["यादव"],
+    "yaadav": ["यादव"],
+    "kumar": ["कुमार"],
+    "kumari": ["कुमारी"],
+    "singh": ["सिंह"],
+    "ram": ["राम"],
+    "lal": ["लाल"],
+    "prasad": ["प्रसाद"],
+    "shyam": ["श्याम"],
+    "shiv": ["शिव"],
+    "rajesh": ["राजेश"],
+    "rakesh": ["राकेश"],
+    "dinesh": ["दिनेश"],
+    "mahesh": ["महेश"],
+    "suresh": ["सुरेश"],
+    "ramesh": ["रमेश"],
+    "sunita": ["सुनीता"],
+    "geeta": ["गीता"],
+    "gita": ["गीता"],
+    "sita": ["सीता"],
+    "usha": ["उषा"],
+    "neha": ["नेहा"],
+}
+
+
+RELATION_WORDS = "wife|husband|father|mother|son|daughter"
+
+
+def _roman_tokens(text: str) -> List[str]:
+    return re.findall(r"[a-zA-Z]+", (text or "").lower())
+
+
+def _hindi_terms_from_phrase(phrase: str) -> List[str]:
+    terms: List[str] = []
+    for token in _roman_tokens(phrase):
+        for term in ROMANIZED_HINDI_TERMS.get(token, []):
+            if term not in terms:
+                terms.append(term)
+    return terms
+
+
+def _extract_house_no(question: str) -> Optional[str]:
+    patterns = [
+        r"\bhouse\s*(?:number|no\.?|#)?\s*([0-9A-Za-z/-]+)",
+        r"\bhouse\s+([0-9A-Za-z/-]+)",
+        r"\bमकान\s*(?:नंबर|संख्या)?\s*([0-9A-Za-z/-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, question or "", flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _extract_person_and_relative(question: str) -> Tuple[str, str]:
+    text = question or ""
+    relation_match = re.search(
+        rf"\b({RELATION_WORDS})\s+of\s+([a-zA-Z ]+?)(?=\s+\b(?:house|search|in|at|from)\b|[.,;]|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not relation_match:
+        return text, ""
+
+    person = text[: relation_match.start()].strip(" .,;:-")
+    relative = relation_match.group(2).strip(" .,;:-")
+    return person, relative
+
+
+def _format_voter_rows(rows: List[Dict[str, Any]], question: str) -> str:
+    def row_line(row: Dict[str, Any], index: Optional[int] = None) -> str:
+        prefix = f"{index}. " if index is not None else ""
+        relation = row.get("relation_type") or "Relative"
+        parts = [
+            f"{prefix}Name: {row.get('name', '')}",
+            f"Relative: {row.get('relative_name', '')} ({relation})",
+            f"House number: {row.get('house_no', '')}",
+            f"Age/Gender: {row.get('age', '')}, {row.get('gender', '')}",
+            f"Polling station: {row.get('polling_station', '')}",
+            f"Region: {row.get('region', '')}",
+            f"EPIC: {row.get('epic_id', '')}",
+        ]
+        return "\n".join(parts)
+
+    if wants_hindi(question):
+        if len(rows) == 1:
+            row = rows[0]
+            relation = row.get("relation_type") or "Relative"
+            return "\n".join(
+                [
+                    "मिलान वाला मतदाता मिला।",
+                    f"नाम: {row.get('name', '')}",
+                    f"रिश्तेदार: {row.get('relative_name', '')} ({relation})",
+                    f"मकान नंबर: {row.get('house_no', '')}",
+                    f"उम्र/लिंग: {row.get('age', '')}, {row.get('gender', '')}",
+                    f"मतदान केंद्र: {row.get('polling_station', '')}",
+                    f"क्षेत्र: {row.get('region', '')}",
+                    f"EPIC: {row.get('epic_id', '')}",
+                ]
+            )
+        return "मिलान वाले मतदाता मिले।\n" + "\n\n".join(
+            row_line(row, i + 1) for i, row in enumerate(rows[:5])
+        )
+
+    if len(rows) == 1:
+        return "Found matching voter.\n" + row_line(rows[0])
+    return "Found matching voters.\n" + "\n\n".join(row_line(row, i + 1) for i, row in enumerate(rows[:5]))
+
+
+def try_direct_voter_lookup(question: str, slug: str) -> Optional[str]:
+    if not re.search(r"[a-zA-Z]", question or ""):
+        return None
+    if not re.search(r"\b(search|find|voter|electoral|db|house|wife|husband|father|mother|son|daughter)\b", question or "", flags=re.IGNORECASE):
+        return None
+
+    person_phrase, relative_phrase = _extract_person_and_relative(question)
+    person_terms = _hindi_terms_from_phrase(person_phrase)
+    relative_terms = _hindi_terms_from_phrase(relative_phrase)
+    house_no = _extract_house_no(question)
+
+    if not person_terms and not relative_terms:
+        return None
+
+    conditions = []
+    params: List[Any] = []
+    for term in person_terms:
+        conditions.append("name LIKE ?")
+        params.append(f"%{term}%")
+    for term in relative_terms:
+        conditions.append("relative_name LIKE ?")
+        params.append(f"%{term}%")
+    if house_no:
+        conditions.append("TRIM(CAST(house_no AS TEXT)) = ?")
+        params.append(house_no)
+
+    sql = """
+        SELECT serial_no, name, relative_name, relation_type, house_no, age, gender,
+               epic_id, polling_station, caste, social_category, religion, region
+        FROM voters
+        WHERE {where}
+        ORDER BY polling_station, serial_no
+        LIMIT 10
+    """.format(where=" AND ".join(conditions))
+
+    try:
+        conn = gcs_data.open_sqlite(slug, "voters.db")
+        conn.row_factory = sqlite3.Row
+        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+        conn.close()
+    except Exception:
+        return None
+
+    if not rows:
+        return None
+    return _format_voter_rows(rows, question)
+
+
 # ---------------------------------------------------------------------------
 # ReAct state
 # ---------------------------------------------------------------------------
@@ -375,6 +539,10 @@ def run_voter_agent(question: str, slug: str, meta: Dict[str, str]) -> str:
         live = f"(schema unavailable: {e})"
 
     system = system + "\n\nLIVE DATABASE CONTEXT\n---------------------\n" + wrap_electoral(live)
+
+    direct_answer = try_direct_voter_lookup(question, slug)
+    if direct_answer:
+        return direct_answer
 
     state = ReactState(question=question)
     for turn in range(1, 6):
