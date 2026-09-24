@@ -222,6 +222,82 @@ def wrap_electoral(text: str) -> str:
     return f"<electoral_data>\n{text}\n</electoral_data>"
 
 
+def wants_hindi(text: str) -> bool:
+    return bool(re.search(r"[\u0900-\u097F]", text or ""))
+
+
+def answer_style_instruction(question: str) -> str:
+    language = "Hindi" if wants_hindi(question) else "English"
+    return f"""
+Write the user-facing answer in {language}.
+
+Presentation rules:
+- Use plain text only. Do not use Markdown, asterisks, hashes, tables, or code blocks.
+- Do not mention SQL, query, database, result rows, tool output, JSON, evidence, or internal agent names.
+- Use short, simple, professional sentences.
+- Start with a direct answer, then add useful context.
+- For counts, show the number with commas and say what it represents.
+- If helpful, use simple numbered lines like "1. Total voters: 111,537".
+- Do not expose reasoning or internal process.
+- Do not invent numbers.
+""".strip()
+
+
+def clean_user_answer(answer: str, question: str) -> str:
+    text = str(answer or "").strip()
+    if not text:
+        return text
+
+    replacements = {
+        "**": "",
+        "__": "",
+        "```": "",
+        "###": "",
+        "##": "",
+        "#": "",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    internal_patterns = [
+        r"\bfrom the SQL results,?\s*",
+        r"\bfrom SQL results,?\s*",
+        r"\bbased on the SQL results,?\s*",
+        r"\bbased on SQL results,?\s*",
+        r"\baccording to the SQL query,?\s*",
+        r"\bthe query shows that\s*",
+        r"\bthe query returned\s*",
+        r"\bSQL query\b",
+        r"\bSQL\b",
+        r"\bquery results\b",
+        r"\bresult rows\b",
+        r"\btool output\b",
+        r"\bJSON\b",
+        r"\bevidence\b",
+        r"\bVoter Agent\b",
+        r"\bHistory Agent\b",
+        r"\bPortfolio Agent\b",
+    ]
+    for pattern in internal_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    text = re.sub(r":\s*,\s*", ": ", text)
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r",\s*,", ",", text)
+
+    lines = []
+    for line in text.splitlines():
+        cleaned = line.strip()
+        cleaned = re.sub(r"^\s*[-*]\s+", "", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        cleaned = cleaned.strip(" :")
+        if cleaned:
+            lines.append(cleaned)
+
+    text = "\n".join(lines).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
 # ---------------------------------------------------------------------------
 # ReAct state
 # ---------------------------------------------------------------------------
@@ -313,14 +389,28 @@ def run_voter_agent(question: str, slug: str, meta: Dict[str, str]) -> str:
     good = [s for s in state.steps if s.action == "sql" and not s.observation.startswith("ERROR")]
     if not good:
         return "I could not produce a reliable answer from the voter roll for this question."
-    blocks = "\n\n".join(f"SQL:\n{s.action_input}\nResult:\n{s.observation[:3000]}" for s in good)
+    blocks = "\n\n".join(
+        f"Internal calculation:\n{s.action_input}\nVerified data:\n{s.observation[:3000]}"
+        for s in good
+    )
     return gemini_chat(
         [
             {
                 "role": "system",
-                "content": "You are the Voter Agent. Answer using ONLY the SQL evidence. Do not invent numbers. Be clear and concise.",
+                "content": (
+                    "You are preparing the final answer for a campaign user. "
+                    "Use only the verified data. Do not invent numbers.\n\n"
+                    + answer_style_instruction(question)
+                ),
             },
-            {"role": "user", "content": f"Question: {question}\n\nEvidence:\n{blocks}\n\nWrite the final answer."},
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {question}\n\n"
+                    f"Private work material. Do not mention this material in the answer:\n{blocks}\n\n"
+                    "Write the final user-facing answer."
+                ),
+            },
         ],
         temperature=0.1,
     )
@@ -378,14 +468,28 @@ def run_history_agent(question: str, slug: str, meta: Dict[str, str]) -> str:
     good = [s for s in state.steps if s.action == "sql" and not s.observation.startswith("ERROR")]
     if not good:
         return "I could not produce a reliable answer from the election history for this question."
-    blocks = "\n\n".join(f"SQL:\n{s.action_input}\nResult:\n{s.observation[:3500]}" for s in good)
+    blocks = "\n\n".join(
+        f"Internal calculation:\n{s.action_input}\nVerified data:\n{s.observation[:3500]}"
+        for s in good
+    )
     return gemini_chat(
         [
             {
                 "role": "system",
-                "content": "You are the History Agent. Answer using ONLY the SQL evidence. Do not invent numbers.",
+                "content": (
+                    "You are preparing the final answer for a campaign user. "
+                    "Use only the verified election data. Do not invent numbers.\n\n"
+                    + answer_style_instruction(question)
+                ),
             },
-            {"role": "user", "content": f"Question: {question}\n\nEvidence:\n{blocks}\n\nWrite the final answer."},
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {question}\n\n"
+                    f"Private work material. Do not mention this material in the answer:\n{blocks}\n\n"
+                    "Write the final user-facing answer."
+                ),
+            },
         ],
         temperature=0.1,
     )
@@ -457,7 +561,9 @@ Normalize part mentions to Part_N. Empty lists if nothing mentioned.
                 "role": "user",
                 "content": f"Question: {question}\n\nEvidence:\n"
                 + wrap_electoral("\n\n".join(evidence))
-                + "\n\nWrite a clear final answer from the portfolio data only.",
+                + "\n\n"
+                + answer_style_instruction(question)
+                + "\n\nWrite the final user-facing answer from the portfolio data only.",
             },
         ],
         temperature=0.1,
@@ -520,20 +626,24 @@ If the question is pure greeting / capabilities, tools can be [].
     if len(results) == 1:
         answer = results[0][1]
     else:
-        evidence = "\n\n".join(f"### {name}\n{ans}" for name, ans in results)
+        evidence = "\n\n".join(f"{name}\n{ans}" for name, ans in results)
         answer = gemini_chat(
             [
-                {"role": "system", "content": system},
+                {
+                    "role": "system",
+                    "content": system + "\n\n" + answer_style_instruction(question),
+                },
                 {
                     "role": "user",
                     "content": f"Question: {question}\n\nSpecialist findings:\n{evidence}\n\n"
-                    "Synthesise one clear final answer for the campaign user. "
-                    "Do not invent numbers.",
+                    "Write one clear final answer for the campaign user. "
+                    "Do not invent numbers or mention internal process.",
                 },
             ],
             temperature=0.1,
         )
 
+    answer = clean_user_answer(answer, question)
     return {
         "answer": answer,
         "charts": [],
