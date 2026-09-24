@@ -1,0 +1,37 @@
+steps:
+  - id: build-frontend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-frontend:latest
+      - -f
+      - frontend/Dockerfile
+      - --build-arg
+      - NEXT_PUBLIC_API_URL=$_NEXT_PUBLIC_API_URL
+      - .
+  - id: push-frontend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-frontend:latest
+  - id: deploy-frontend
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - booth-frontend
+      - --image=asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-frontend:latest
+      - --region=asia-south1
+      - --platform=managed
+      - --allow-unauthenticated
+      - --port=8080
+      - --memory=512Mi
+      - --cpu=1
+images:
+  - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-frontend:latest
+substitutions:
+  _NEXT_PUBLIC_API_URL: https://booth-backend-168028165100.asia-south1.run.app
+options:
+  logging: CLOUD_LOGGING_ONLY

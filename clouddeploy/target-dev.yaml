@@ -1,0 +1,8 @@
+apiVersion: deploy.cloud.google.com/v1
+kind: Target
+metadata:
+  name: dev
+description: Development
+requireApproval: false
+run:
+  location: projects/PROJECT_ID/locations/asia-south1

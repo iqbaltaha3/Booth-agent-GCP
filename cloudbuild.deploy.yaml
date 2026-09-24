@@ -1,0 +1,34 @@
+steps:
+  - id: build-backend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
+      - -f
+      - backend/Dockerfile
+      - .
+  - id: push-backend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
+  - id: deploy-backend
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - booth-backend
+      - --image=asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
+      - --region=asia-south1
+      - --platform=managed
+      - --allow-unauthenticated
+      - --port=8080
+      - --memory=1Gi
+      - --cpu=1
+      - --set-env-vars=ENV=dev,REGION=asia-south1,AGENT_LOCAL_MODE=true,GCS_DATA_BUCKET=booth-agent-data-dev,GEMINI_MODEL=gemini-2.5-flash,CONSTITUENCIES_MANIFEST_PATH=/constituencies/manifest.json
+images:
+  - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
+options:
+  logging: CLOUD_LOGGING_ONLY

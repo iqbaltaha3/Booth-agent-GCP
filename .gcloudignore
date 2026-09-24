@@ -1,0 +1,16 @@
+.git
+.gitignore
+.gcloudignore
+
+legacy-data/
+*.db
+
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env*
+
+backend/.env
+**/__pycache__/
+**/*.pyc
+.DS_Store

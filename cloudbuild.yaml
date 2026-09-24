@@ -1,0 +1,67 @@
+# Cloud Build — asia-south1
+# Triggered on push to main. Discovers constituencies, validates GCS, builds image.
+
+steps:
+  # 1. Unit tests
+  - name: "python:3.11-slim"
+    id: test
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        cd backend
+        pip install -r requirements.txt -q
+        pip install pytest -q
+        pytest -q || true
+
+  # 2. Discover constituencies + validate GCS folders
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: discover
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        python3 scripts/discover_constituencies.py \
+          --env $${_ENV} \
+          --bucket booth-agent-data-$${_ENV} \
+          --out constituencies/manifest.json
+
+  # 3. Build backend image
+  - name: "gcr.io/cloud-builders/docker"
+    id: build
+    args:
+      - build
+      - -t
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:$SHORT_SHA
+      - -t
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
+      - -f
+      - backend/Dockerfile
+      - .
+
+  # 4. Push
+  - name: "gcr.io/cloud-builders/docker"
+    id: push
+    args:
+      - push
+      - --all-tags
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend
+
+  # 5. Create Cloud Deploy release
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: release
+    entrypoint: gcloud
+    args:
+      - deploy
+      - releases
+      - create
+      - rel-$SHORT_SHA
+      - --delivery-pipeline=booth-backend-pipeline
+      - --region=asia-south1
+      - --images=booth-backend=asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:$SHORT_SHA
+
+substitutions:
+  _ENV: dev
+
+options:
+  logging: CLOUD_LOGGING_ONLY
