@@ -1,67 +1,78 @@
-# Cloud Build — asia-south1
-# Triggered on push to main. Discovers constituencies, validates GCS, builds image.
+# CI/CD entrypoint for the GitHub push trigger.
+# A push to main builds and deploys both Cloud Run services.
 
 steps:
-  # 1. Unit tests
-  - name: "python:3.11-slim"
-    id: test
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        cd backend
-        pip install -r requirements.txt -q
-        pip install pytest -q
-        pytest -q || true
-
-  # 2. Discover constituencies + validate GCS folders
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: discover
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        python3 scripts/discover_constituencies.py \
-          --env $${_ENV} \
-          --bucket booth-agent-data-$${_ENV} \
-          --out constituencies/manifest.json
-
-  # 3. Build backend image
-  - name: "gcr.io/cloud-builders/docker"
-    id: build
+  - id: build-backend
+    name: gcr.io/cloud-builders/docker
     args:
       - build
-      - -t
-      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:$SHORT_SHA
       - -t
       - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
       - -f
       - backend/Dockerfile
       - .
 
-  # 4. Push
-  - name: "gcr.io/cloud-builders/docker"
-    id: push
+  - id: push-backend
+    name: gcr.io/cloud-builders/docker
     args:
       - push
-      - --all-tags
-      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
 
-  # 5. Create Cloud Deploy release
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: release
+  - id: deploy-backend
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
     args:
+      - run
       - deploy
-      - releases
-      - create
-      - rel-$SHORT_SHA
-      - --delivery-pipeline=booth-backend-pipeline
+      - booth-backend
+      - --image=asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
       - --region=asia-south1
-      - --images=booth-backend=asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:$SHORT_SHA
+      - --platform=managed
+      - --allow-unauthenticated
+      - --port=8080
+      - --memory=1Gi
+      - --cpu=1
+      - --set-env-vars=ENV=dev,REGION=asia-south1,AGENT_LOCAL_MODE=true,GCS_DATA_BUCKET=booth-agent-data-dev,GEMINI_MODEL=gemini-2.5-flash,CONSTITUENCIES_MANIFEST_PATH=/constituencies/manifest.json
+
+  - id: build-frontend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-frontend:latest
+      - -f
+      - frontend/Dockerfile
+      - --build-arg
+      - NEXT_PUBLIC_API_URL=$_NEXT_PUBLIC_API_URL
+      - .
+
+  - id: push-frontend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-frontend:latest
+
+  - id: deploy-frontend
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - booth-frontend
+      - --image=asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-frontend:latest
+      - --region=asia-south1
+      - --platform=managed
+      - --allow-unauthenticated
+      - --port=8080
+      - --memory=512Mi
+      - --cpu=1
+
+images:
+  - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
+  - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-frontend:latest
 
 substitutions:
-  _ENV: dev
+  _NEXT_PUBLIC_API_URL: https://booth-backend-168028165100.asia-south1.run.app
 
 options:
   logging: CLOUD_LOGGING_ONLY
