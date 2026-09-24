@@ -302,6 +302,8 @@ def clean_user_answer(answer: str, question: str) -> str:
     ) or bool(re.search(r"कुल.*मतदाता|मतदाता.*कुल", question or ""))
     if total_voter_question:
         match = re.search(r"([\d,]+)\s+(?:total\s+)?voters?", text, flags=re.IGNORECASE)
+        if not match:
+            match = re.search(r"\b([\d]{1,3}(?:,[\d]{3})+|[\d]+)\b", text)
         if match:
             count = match.group(1)
             if wants_hindi(question):
