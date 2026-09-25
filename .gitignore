@@ -33,3 +33,5 @@ build/
 frontend/.next/
 frontend/out/
 *.log
+
+upload-constituency-folders
