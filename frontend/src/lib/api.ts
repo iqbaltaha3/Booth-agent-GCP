@@ -27,6 +27,29 @@ export type ChatResponse = {
   latency_ms?: number;
 };
 
+export type BoothOption = {
+  part_number: string;
+  booth_name: string;
+  region: string;
+  total_voters?: number | null;
+};
+
+export type BoothRegion = {
+  region: string;
+  booths: BoothOption[];
+};
+
+export type BoothListResponse = {
+  regions: BoothRegion[];
+};
+
+export type BoothPortfolioResponse = {
+  booth_name?: string | null;
+  part_number?: string | null;
+  portfolio: Record<string, unknown>;
+  source_file?: string | null;
+};
+
 async function authHeader(token: string | null): Promise<HeadersInit> {
   const h: HeadersInit = { "Content-Type": "application/json" };
   if (token) h["Authorization"] = `Bearer ${token}`;
@@ -75,6 +98,42 @@ export async function sendChat(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(text || `Chat failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function listBooths(
+  constituencyId: string,
+  token: string | null
+): Promise<BoothListResponse> {
+  const res = await fetch(
+    `${API_URL}/portfolio/booths?constituency_id=${encodeURIComponent(
+      constituencyId
+    )}`,
+    { headers: await authHeader(token) }
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `Failed to load booths (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function getBoothPortfolio(
+  constituencyId: string,
+  boothIdentifier: string,
+  token: string | null
+): Promise<BoothPortfolioResponse | null> {
+  const res = await fetch(
+    `${API_URL}/portfolio/${encodeURIComponent(
+      boothIdentifier
+    )}?constituency_id=${encodeURIComponent(constituencyId)}`,
+    { headers: await authHeader(token) }
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `Failed to load booth report (${res.status})`);
   }
   return res.json();
 }

@@ -14,3 +14,19 @@ class PortfolioResponse(BaseModel):
 
 class PortfolioSearchResponse(BaseModel):
     matches: List[Dict[str, Any]]
+
+
+class BoothOption(BaseModel):
+    part_number: str
+    booth_name: str
+    region: str
+    total_voters: Optional[float] = None
+
+
+class BoothRegion(BaseModel):
+    region: str
+    booths: List[BoothOption]
+
+
+class BoothListResponse(BaseModel):
+    regions: List[BoothRegion]

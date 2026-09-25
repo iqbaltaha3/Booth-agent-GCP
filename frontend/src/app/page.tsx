@@ -12,11 +12,16 @@ import LangToggle from "@/components/LangToggle";
 import { getFirebaseAuth, isDemoMode } from "@/lib/firebase";
 import {
   listConstituencies,
+  listBooths,
+  getBoothPortfolio,
   sendChat,
   transcribeAudio,
   synthesizeSpeech,
   type Constituency,
   type ChatResponse,
+  type BoothOption,
+  type BoothRegion,
+  type BoothPortfolioResponse,
 } from "@/lib/api";
 import { startRecording, playAudioBlob, type RecorderHandle } from "@/lib/voice";
 import { t, type Lang } from "@/i18n/messages";
@@ -30,6 +35,261 @@ type Msg = {
 };
 
 type Screen = "login" | "select" | "chat";
+type WorkspaceTab = "chat" | "reports";
+
+type ReportData = Record<string, unknown>;
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function formatNumber(value: unknown, suffix = ""): string {
+  const n = asNumber(value);
+  if (n == null) return "—";
+  return `${new Intl.NumberFormat("en-IN", {
+    maximumFractionDigits: Number.isInteger(n) ? 0 : 1,
+  }).format(n)}${suffix}`;
+}
+
+function labelText(value: string): string {
+  return value
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function topEntries(value: unknown, limit = 8): [string, number][] {
+  return Object.entries(asRecord(value))
+    .map(([key, val]) => [key, asNumber(val)] as [string, number | null])
+    .filter((entry): entry is [string, number] => entry[1] != null)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit);
+}
+
+function StatTile({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+      <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+        {label}
+      </p>
+      <p className="mt-1 text-2xl font-semibold text-slate-950">{value}</p>
+      {hint && <p className="mt-1 text-xs text-slate-500">{hint}</p>}
+    </div>
+  );
+}
+
+function BarList({
+  title,
+  entries,
+  mode = "count",
+}: {
+  title: string;
+  entries: [string, number][];
+  mode?: "count" | "percent";
+}) {
+  const max = Math.max(...entries.map(([, value]) => value), 1);
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+      <h3 className="text-sm font-semibold text-slate-950">{title}</h3>
+      <div className="mt-4 space-y-3">
+        {entries.length === 0 ? (
+          <p className="text-sm text-slate-500">No data available.</p>
+        ) : (
+          entries.map(([label, value]) => (
+            <div key={label}>
+              <div className="mb-1 flex items-center justify-between gap-3 text-xs">
+                <span className="truncate font-medium text-slate-700">
+                  {labelText(label)}
+                </span>
+                <span className="shrink-0 text-slate-500">
+                  {mode === "percent"
+                    ? `${value.toFixed(value % 1 === 0 ? 0 : 1)}%`
+                    : formatNumber(value)}
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+                <div
+                  className="h-full rounded-full bg-navy-900"
+                  style={{ width: `${Math.max(4, (value / max) * 100)}%` }}
+                />
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function Donut({
+  title,
+  entries,
+}: {
+  title: string;
+  entries: [string, number][];
+}) {
+  const total = entries.reduce((sum, [, value]) => sum + value, 0);
+  const colors = ["#0b1f3a", "#2f6f73", "#d4a017", "#64748b", "#9f6b3f"];
+  let cursor = 0;
+  const gradient = entries
+    .map(([, value], index) => {
+      const start = cursor;
+      const end = total > 0 ? cursor + (value / total) * 100 : cursor;
+      cursor = end;
+      return `${colors[index % colors.length]} ${start}% ${end}%`;
+    })
+    .join(", ");
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+      <h3 className="text-sm font-semibold text-slate-950">{title}</h3>
+      <div className="mt-4 flex items-center gap-5">
+        <div
+          className="grid h-28 w-28 shrink-0 place-items-center rounded-full"
+          style={{
+            background: total > 0 ? `conic-gradient(${gradient})` : "#e2e8f0",
+          }}
+        >
+          <div className="grid h-16 w-16 place-items-center rounded-full bg-white text-sm font-semibold text-slate-900">
+            {formatNumber(total)}
+          </div>
+        </div>
+        <div className="min-w-0 flex-1 space-y-2">
+          {entries.map(([label, value], index) => (
+            <div key={label} className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <span
+                  className="h-2.5 w-2.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: colors[index % colors.length] }}
+                />
+                <span className="truncate text-sm text-slate-700">
+                  {labelText(label)}
+                </span>
+              </div>
+              <span className="text-sm font-medium text-slate-950">
+                {formatNumber(value)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function BoothReport({
+  report,
+  selectedBooth,
+}: {
+  report: BoothPortfolioResponse;
+  selectedBooth: BoothOption;
+}) {
+  const data = report.portfolio as ReportData;
+  const metadata = asRecord(data.booth_metadata);
+  const gender = asRecord(data.gender_demographics);
+  const age = asRecord(data.age_demographics);
+  const ageStats = asRecord(age.statistics);
+  const socio = asRecord(data.socio_religious_profile);
+  const household = asRecord(data.household_structure);
+  const relation = asRecord(data.family_relation_types);
+
+  const genderEntries = topEntries(gender.counts, 4);
+  const ageEntries = topEntries(age.distribution_counts, 8);
+  const religionEntries = topEntries(socio.religion_counts, 5);
+  const categoryEntries = topEntries(socio.social_category_counts, 6);
+  const casteEntries = topEntries(socio.caste_breakdown_counts, 10);
+  const familyEntries = topEntries(relation.counts || relation, 8);
+
+  return (
+    <div className="space-y-5">
+      <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+              Booth Report
+            </p>
+            <h2 className="mt-1 text-xl font-semibold text-slate-950">
+              {selectedBooth.part_number} · {selectedBooth.booth_name}
+            </h2>
+            <p className="mt-1 text-sm text-slate-500">
+              {selectedBooth.region} region
+              {report.source_file ? ` · ${report.source_file}` : ""}
+            </p>
+          </div>
+          <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">
+            Profile source: {String(metadata.booth_name || selectedBooth.part_number)}
+          </div>
+        </div>
+      </section>
+
+      <div className="grid gap-3 md:grid-cols-4">
+        <StatTile
+          label="Registered Voters"
+          value={formatNumber(metadata.total_registered_voters)}
+          hint="From booth analysis"
+        />
+        <StatTile label="Mean Age" value={formatNumber(ageStats.mean_age)} />
+        <StatTile
+          label="Median Age"
+          value={formatNumber(ageStats.median_age)}
+        />
+        <StatTile
+          label="Sex Ratio"
+          value={formatNumber(gender.sex_ratio_females_per_1000_males)}
+          hint="Females per 1,000 males"
+        />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Donut title="Gender Composition" entries={genderEntries} />
+        <BarList title="Age Bands" entries={ageEntries} />
+        <Donut title="Religion Profile" entries={religionEntries} />
+        <BarList title="Social Categories" entries={categoryEntries} />
+        <BarList title="Top Caste Groups" entries={casteEntries} />
+        <BarList title="Family Relation Types" entries={familyEntries} />
+      </div>
+
+      {Object.keys(household).length > 0 && (
+        <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h3 className="text-sm font-semibold text-slate-950">
+            Household Structure
+          </h3>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            {Object.entries(household).slice(0, 6).map(([key, value]) => (
+              <div key={key} className="rounded-lg bg-slate-50 px-3 py-2">
+                <p className="text-xs text-slate-500">{labelText(key)}</p>
+                <p className="text-base font-semibold text-slate-950">
+                  {typeof value === "object"
+                    ? `${Object.keys(asRecord(value)).length} groups`
+                    : formatNumber(value)}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
 
 export default function HomePage() {
   const [lang, setLang] = useState<Lang>("en");
@@ -43,12 +303,21 @@ export default function HomePage() {
 
   const [constituencies, setConstituencies] = useState<Constituency[]>([]);
   const [selected, setSelected] = useState<Constituency | null>(null);
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("chat");
 
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+
+  const [boothRegions, setBoothRegions] = useState<BoothRegion[]>([]);
+  const [boothsLoading, setBoothsLoading] = useState(false);
+  const [boothError, setBoothError] = useState("");
+  const [selectedPart, setSelectedPart] = useState("");
+  const [report, setReport] = useState<BoothPortfolioResponse | null>(null);
+  const [reportMissing, setReportMissing] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
 
   // Voice state
   const [recording, setRecording] = useState(false);
@@ -140,17 +409,67 @@ export default function HomePage() {
     stopPlaybackRef.current?.();
     if (!demo) await signOut(getFirebaseAuth());
     setSelected(null);
+    setActiveTab("chat");
     setMessages([]);
     setSessionId(null);
+    setBoothRegions([]);
+    setSelectedPart("");
+    setReport(null);
+    setReportMissing(false);
     setScreen("login");
   };
 
   const enterChat = (c: Constituency) => {
     setSelected(c);
+    setActiveTab("chat");
     setMessages([]);
     setSessionId(null);
+    setBoothRegions([]);
+    setSelectedPart("");
+    setReport(null);
+    setReportMissing(false);
     setScreen("chat");
   };
+
+  useEffect(() => {
+    if (!selected || screen !== "chat" || activeTab !== "reports") return;
+    setBoothsLoading(true);
+    setBoothError("");
+    listBooths(selected.slug, token)
+      .then((res) => setBoothRegions(res.regions))
+      .catch((err) =>
+        setBoothError(
+          err instanceof Error ? err.message : "Failed to load booth list."
+        )
+      )
+      .finally(() => setBoothsLoading(false));
+  }, [activeTab, screen, selected, token]);
+
+  const allBooths = boothRegions.flatMap((region) => region.booths);
+  const selectedBooth =
+    allBooths.find((booth) => booth.part_number === selectedPart) || null;
+
+  const loadReport = useCallback(
+    async (partNumber: string) => {
+      if (!selected || !partNumber) return;
+      setReport(null);
+      setReportMissing(false);
+      setBoothError("");
+      setReportLoading(true);
+      try {
+        const res = await getBoothPortfolio(selected.slug, partNumber, token);
+        if (res) setReport(res);
+        else setReportMissing(true);
+      } catch (err) {
+        setBoothError(
+          err instanceof Error ? err.message : "Failed to load booth report."
+        );
+      } finally {
+        setReportLoading(false);
+      }
+    },
+    [selected, token]
+  );
 
   const ask = useCallback(
     async (question: string) => {
@@ -479,6 +798,27 @@ export default function HomePage() {
         </div>
       </header>
 
+      <nav className="shrink-0 border-b border-slate-200 bg-white px-3">
+        <div className="mx-auto flex max-w-5xl gap-1">
+          {(["chat", "reports"] as WorkspaceTab[]).map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => setActiveTab(tab)}
+              className={`border-b-2 px-4 py-3 text-sm font-semibold transition ${
+                activeTab === tab
+                  ? "border-navy-900 text-navy-950"
+                  : "border-transparent text-slate-500 hover:text-slate-900"
+              }`}
+            >
+              {tab === "chat" ? "Chat" : "Booth Reports"}
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      {activeTab === "chat" ? (
+        <>
       <div className="flex-1 overflow-y-auto px-3 py-4">
         {messages.length === 0 && (
           <div className="mx-auto max-w-lg py-6 text-center">
@@ -634,6 +974,113 @@ export default function HomePage() {
           {selected?.name} · {t(lang, "taglineNative")}
         </p>
       </div>
+        </>
+      ) : (
+        <div className="flex-1 overflow-y-auto bg-slate-50 px-4 py-5">
+          <div className="mx-auto max-w-6xl space-y-5">
+            <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                    {selected?.name} Constituency
+                  </p>
+                  <h1 className="mt-1 text-2xl font-semibold text-slate-950">
+                    Booth Reports
+                  </h1>
+                  <p className="mt-1 max-w-2xl text-sm text-slate-500">
+                    Select a region and booth from this constituency only. Reports are read from the selected constituency&apos;s booth analysis folder.
+                  </p>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                  {boothRegions.length} regions · {allBooths.length} booths
+                </div>
+              </div>
+            </section>
+
+            {boothsLoading && (
+              <div className="rounded-lg border border-slate-200 bg-white p-5 text-sm text-slate-500 shadow-sm">
+                Loading booth list...
+              </div>
+            )}
+
+            {boothError && (
+              <div className="rounded-lg border border-red-100 bg-red-50 p-4 text-sm text-red-700">
+                {boothError}
+              </div>
+            )}
+
+            {!boothsLoading && boothRegions.length > 0 && (
+              <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                <label className="block text-sm font-semibold text-slate-950">
+                  Choose booth / part number
+                </label>
+                <select
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 text-sm text-slate-900 outline-none ring-gold/40 focus:border-gold focus:ring-2"
+                  value={selectedPart}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setSelectedPart(next);
+                    if (next) loadReport(next);
+                    else {
+                      setReport(null);
+                      setReportMissing(false);
+                    }
+                  }}
+                >
+                  <option value="">Select a booth</option>
+                  {boothRegions.map((region) => (
+                    <optgroup key={region.region} label={labelText(region.region)}>
+                      {region.booths.map((booth) => (
+                        <option key={booth.part_number} value={booth.part_number}>
+                          {booth.part_number} · {booth.booth_name}
+                          {booth.total_voters ? ` · ${formatNumber(booth.total_voters)} voters` : ""}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                {selectedBooth && (
+                  <div className="mt-3 grid gap-2 text-sm text-slate-600 md:grid-cols-3">
+                    <div className="rounded-lg bg-slate-50 px-3 py-2">
+                      <span className="font-medium text-slate-900">Region:</span>{" "}
+                      {labelText(selectedBooth.region)}
+                    </div>
+                    <div className="rounded-lg bg-slate-50 px-3 py-2">
+                      <span className="font-medium text-slate-900">Part:</span>{" "}
+                      {selectedBooth.part_number}
+                    </div>
+                    <div className="rounded-lg bg-slate-50 px-3 py-2">
+                      <span className="font-medium text-slate-900">Boothlist voters:</span>{" "}
+                      {formatNumber(selectedBooth.total_voters)}
+                    </div>
+                  </div>
+                )}
+              </section>
+            )}
+
+            {reportLoading && (
+              <div className="rounded-lg border border-slate-200 bg-white p-5 text-sm text-slate-500 shadow-sm">
+                Preparing report...
+              </div>
+            )}
+
+            {reportMissing && selectedBooth && (
+              <div className="rounded-lg border border-slate-200 bg-white p-8 text-center shadow-sm">
+                <p className="text-lg font-semibold text-slate-950">
+                  This Booth&apos;s data will soon arrive.
+                </p>
+                <p className="mt-2 text-sm text-slate-500">
+                  {selectedBooth.part_number} · {selectedBooth.booth_name}
+                </p>
+              </div>
+            )}
+
+            {report && selectedBooth && (
+              <BoothReport report={report} selectedBooth={selectedBooth} />
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
