@@ -101,6 +101,7 @@ def resolve_data_path(slug: str, filename: str) -> Path:
     dest = _CACHE_DIR / slug
     dest.mkdir(parents=True, exist_ok=True)
     local_path = dest / filename
+    local_path.parent.mkdir(parents=True, exist_ok=True)
     blob.download_to_filename(str(local_path))
     _CACHE[cache_key] = local_path
     logger.info("Downloaded gs://%s/%s/%s → %s", settings.gcs_data_bucket, slug, filename, local_path)
