@@ -318,40 +318,6 @@ def clean_user_answer(answer: str, question: str) -> str:
     return text
 
 
-ROMANIZED_HINDI_TERMS = {
-    "gayatri": ["गायत्री"],
-    "gyatri": ["गायत्री"],
-    "gaytri": ["गायत्री"],
-    "devi": ["देवी"],
-    "sanjay": ["संजय"],
-    "sanjai": ["संजय"],
-    "yadav": ["यादव"],
-    "yaadav": ["यादव"],
-    "kumar": ["कुमार"],
-    "kumari": ["कुमारी"],
-    "singh": ["सिंह"],
-    "ram": ["राम"],
-    "lal": ["लाल"],
-    "prasad": ["प्रसाद"],
-    "shyam": ["श्याम"],
-    "shiv": ["शिव"],
-    "rajesh": ["राजेश"],
-    "rakesh": ["राकेश"],
-    "dinesh": ["दिनेश"],
-    "mahesh": ["महेश"],
-    "suresh": ["सुरेश"],
-    "bhonu": ["भोनू"],
-    "bhonoo": ["भोनू"],
-    "ramesh": ["रमेश"],
-    "sunita": ["सुनीता"],
-    "geeta": ["गीता"],
-    "gita": ["गीता"],
-    "sita": ["सीता"],
-    "usha": ["उषा"],
-    "neha": ["नेहा"],
-}
-
-
 RELATION_WORDS = "wife|husband|father|mother|son|daughter"
 RELATION_TYPE_BY_WORD = {
     "father": "Father",
@@ -367,13 +333,54 @@ def _roman_tokens(text: str) -> List[str]:
     return re.findall(r"[a-zA-Z]+", (text or "").lower())
 
 
-def _hindi_terms_from_phrase(phrase: str) -> List[str]:
-    terms: List[str] = []
-    for token in _roman_tokens(phrase):
-        for term in ROMANIZED_HINDI_TERMS.get(token, []):
-            if term not in terms:
-                terms.append(term)
+def _split_devanagari_terms(text: str) -> List[str]:
+    terms = []
+    for term in re.findall(r"[\u0900-\u097F]+", text or ""):
+        if len(term) > 1 and term not in terms:
+            terms.append(term)
     return terms
+
+
+def _transliterate_voter_phrases(person_phrase: str, relative_phrase: str) -> Tuple[List[str], List[str]]:
+    prompt = """
+Convert Romanized Hindi voter-roll names into Devanagari.
+
+Return ONLY JSON:
+{
+  "person_terms": ["..."],
+  "relative_terms": ["..."]
+}
+
+Rules:
+- Convert each meaningful name word to likely Hindi Devanagari spellings.
+- Include common alternate spellings when useful.
+- Do not translate relationship words like father, mother, husband, wife.
+- Do not include English words.
+- Keep output short. Usually 1 to 4 terms per field.
+- If a field is empty, return an empty list.
+""".strip()
+    user = json.dumps(
+        {"person": person_phrase or "", "relative": relative_phrase or ""},
+        ensure_ascii=False,
+    )
+    text = gemini_chat(
+        [{"role": "system", "content": prompt}, {"role": "user", "content": user}],
+        temperature=0.0,
+        max_tokens=512,
+    )
+    parsed = safe_json(text) or {}
+
+    person_terms: List[str] = []
+    relative_terms: List[str] = []
+    for raw in parsed.get("person_terms") or []:
+        for term in _split_devanagari_terms(str(raw)):
+            if term not in person_terms:
+                person_terms.append(term)
+    for raw in parsed.get("relative_terms") or []:
+        for term in _split_devanagari_terms(str(raw)):
+            if term not in relative_terms:
+                relative_terms.append(term)
+    return person_terms, relative_terms
 
 
 def _extract_house_no(question: str) -> Optional[str]:
@@ -465,8 +472,7 @@ def try_direct_voter_lookup(question: str, slug: str) -> Optional[str]:
         return None
 
     person_phrase, relative_phrase, relation_type = _extract_person_and_relative(question)
-    person_terms = _hindi_terms_from_phrase(person_phrase)
-    relative_terms = _hindi_terms_from_phrase(relative_phrase)
+    person_terms, relative_terms = _transliterate_voter_phrases(person_phrase, relative_phrase)
     house_no = _extract_house_no(question)
 
     if not person_terms and not relative_terms:
