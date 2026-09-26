@@ -9,6 +9,24 @@
     "product_tagline": "Booth-level electoral intelligence for Allahabad North"
   },
   {
+    "slug": "allahabad-south",
+    "name": "Allahabad-south",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Prayagraj",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Allahabad-south"
+  },
+  {
+    "slug": "allahabad-west",
+    "name": "Allahabad-west",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Prayagraj",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Allahabad-west"
+  },
+  {
     "slug": "gyanpur",
     "name": "Gyanpur",
     "seat_type": "Vidhan Sabha (Assembly)",
@@ -25,5 +43,14 @@
     "state": "Uttar Pradesh",
     "product_name": "Arjun",
     "product_tagline": "Booth-level electoral intelligence for Meja"
+  },
+  {
+    "slug": "phulpur",
+    "name": "Phulpur",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Prayagraj",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Phulpur"
   }
 ]
