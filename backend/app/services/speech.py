@@ -1,18 +1,14 @@
 """
-Sarvam STT / TTS — ported from sarvam_voice.py, made stateless for FastAPI.
+Convert audio to text and text to audio using Sarvam.
 """
 
 from __future__ import annotations
 
 import base64
-import logging
-from typing import Optional, Tuple
 
 import requests
 
 from app.config import get_settings
-
-logger = logging.getLogger(__name__)
 
 SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
 SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
@@ -22,7 +18,7 @@ def transcribe(
     audio_bytes: bytes,
     filename: str = "audio.wav",
     content_type: str = "audio/wav",
-) -> Tuple[str, Optional[str]]:
+) -> tuple[str, str | None]:
     """
     Returns (transcript_text, detected_language).
     """
@@ -39,9 +35,7 @@ def transcribe(
     }
     headers = {"api-subscription-key": settings.sarvam_api_key}
 
-    resp = requests.post(
-        SARVAM_STT_URL, headers=headers, files=files, data=data, timeout=60
-    )
+    resp = requests.post(SARVAM_STT_URL, headers=headers, files=files, data=data, timeout=60)
     resp.raise_for_status()
     body = resp.json()
     text = body.get("transcript") or body.get("text") or ""
@@ -51,8 +45,8 @@ def transcribe(
 
 def synthesize(
     text: str,
-    language: Optional[str] = None,
-    speaker: Optional[str] = None,
+    language: str | None = None,
+    speaker: str | None = None,
 ) -> bytes:
     """
     Returns raw audio bytes (wav / mp3 depending on Sarvam response).

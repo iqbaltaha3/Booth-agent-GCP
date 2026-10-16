@@ -25,6 +25,7 @@ export type ChatResponse = {
   session_id: string;
   agent_path: string[];
   latency_ms?: number;
+  status?: "complete" | "partial" | "needs_clarification" | "failed";
 };
 
 export type BoothOption = {

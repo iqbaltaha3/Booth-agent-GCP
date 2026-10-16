@@ -79,6 +79,24 @@ curl -s -X POST http://localhost:8080/agent/chat \
 
 ## Architecture in one picture
 
+The implemented runtime runs inside the backend when `AGENT_LOCAL_MODE=true`
+or no Agent Engine resource is configured:
+
+```text
+Frontend → POST /agent/chat → authorize constituency + load session state
+                               ↓
+                         ReAct coordinator
+                               ↓ focused, validated tasks
+                  Voter / History / Portfolio specialists
+                               ↓ structured facts and sources
+                         inspect → refine / clarify / finish
+```
+
+Specialists read the selected constituency's files through the shared data service.
+The Vertex AI Agent Engine topology below is a deployment target: its client exists,
+but `agents/deploy_agent_engine.py` is still a placeholder and does not deploy an
+ADK graph. Configuring an external engine does not automatically install this runtime.
+
 ```
 Frontend
    │  Firebase ID token
@@ -96,6 +114,60 @@ GCS:    gs://booth-agent-data-<env>/<slug>/       (voters.db, history.db, …)
 ```
 
 **Design rule:** one login session → one GCS folder. Other constituencies’ files are never opened.
+
+### Agent coordination and contracts
+
+The coordinator owns task completion. Each model step returns a validated action:
+`delegate`, `clarify`, or `finish`. It designs separate assignments for the relevant
+specialists instead of forwarding the original question to everyone. Specialists
+run sequentially; subsequent coordinator steps can use their results to design
+follow-up tasks. Limits: 8 coordinator steps and 8 specialist calls per user turn;
+SQL specialists have 5 voter or 6 history research steps per call.
+
+Assignments include `task_id`, `agent`, `objective`, `constraints`,
+`required_outputs`, and `acceptance_criteria`. Voter name tasks also include
+`name_query`. Results include `status`, `facts`, `sources`, `limitations`,
+`missing_inputs`, and `errors`. Status is `complete`, `partial`,
+`needs_clarification`, or `failed`. SQL facts come from executed queries rather
+than model-generated summaries. Final data answers cite supporting task IDs
+internally; the user receives a plain-language answer.
+
+When clarification is necessary, `/agent/chat` returns the question in `answer`
+and `status: "needs_clarification"`. Send the user's reply with the same
+`session_id`. The backend supplies recent conversation history and pending tasks
+to resume the original objective. State is private to the user and locked to the
+selected constituency. **Session storage is currently process memory**: restarts
+lose it and multiple Cloud Run instances do not share it. A shared durable session
+store is required before relying on clarification across production instances.
+
+### Hindi voter-name matching
+
+Name tasks explicitly preserve the operation (`count` or `lookup`), booth,
+person/relative names, matching mode and exact roll-column filters. The model
+transliterates only isolated name phrases. Parameterized SQL checks candidate
+spellings against the scoped roll; it never treats the entire question as a name.
+Booths must map uniquely to an actual polling station; fuzzy matches are not
+silently accepted.
+
+Default `word` matching includes `श्याम कुमार` for `श्याम`, but excludes
+`घनश्याम` and `श्यामलाल`. `full` matches the entire name; `substring` is used
+only when explicitly requested. Alternate spellings are OR alternatives; words
+inside a multiword name stay together. Unicode combining marks are preserved and
+joiner differences are normalized. If multiple candidate spellings match different
+scoped names, the coordinator asks which spellings to include. A user can select
+one or all. Counts use `COUNT(*)`; lookup returns at most 20 records with a separate
+total and truncation flag. Transliteration is not exhaustive, so zero matches mean
+zero for the spellings and rule checked, not proof that every possible spelling
+was searched. Schema and spelling interpretation still require model judgment.
+
+Contracts: `agents/contracts.py`. Coordinator and specialists: `agents/runtime.py`.
+Name matching: `agents/name_matching.py`.
+
+Run deterministic regression checks without credentials or real voter data:
+
+```bash
+PYTHONPATH=backend:. python -m unittest discover -s backend/tests -v
+```
 
 ---
 
@@ -187,6 +259,9 @@ gsutil -m rsync -r ./legacy-data/gyanpur/ \
   gs://booth-agent-data-prod/gyanpur/
 ```
 
+
+## e4xample - gcloud storage cp legacy-data/allahabad-north/booth_analysis/ gs://booth-agent-data-$ENV/allahabad-north/booth_analysis/ s
+
 ### Commit only config
 
 Do not commit `legacy-data/` or `.db` files. They are private data.
@@ -258,6 +333,7 @@ That is all. No code change, no new backend service, no new agent deployment.
   "charts": [],
   "session_id": "uuid",
   "agent_path": ["history_agent"],
+  "status": "complete",
   "latency_ms": 4200
 }
 ```
@@ -308,6 +384,9 @@ booth-agent/
 ├── agents/                  # ADK definitions + local runner + shared prompts
 │   ├── prompts/             # SHARED templates (filled from constituency.yaml)
 │   ├── local_runner.py      # in-process ReAct agents for local/dev
+│   ├── contracts.py         # validated coordinator/specialist messages
+│   ├── runtime.py           # task planning, research, clarification and completion
+│   ├── name_matching.py     # scoped Hindi name matching and exact counts
 │   └── deploy_agent_engine.py
 ├── constituencies/
 │   └── gyanpur/

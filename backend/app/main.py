@@ -1,49 +1,18 @@
-"""
-Booth Agent Backend — FastAPI entrypoint.
-"""
-
-from __future__ import annotations
-
-import logging
+"""Create the API and connect its feature routes."""
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import (
-    agent,
-    auth,
-    constituencies,
-    history,
-    portfolio,
-    voice,
-    voter,
-)
+from app.routes import account, booths, chat, elections, voice
 
-logging.basicConfig(level=logging.INFO)
-
-app = FastAPI(
-    title="Booth Agent Backend",
-    description="Arjun — multi-constituency booth-level electoral intelligence",
-    version="2.0.0",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(auth.router)
-app.include_router(constituencies.router)
-app.include_router(voter.router)
-app.include_router(history.router)
-app.include_router(portfolio.router)
-app.include_router(voice.router)
-app.include_router(agent.router)
+app = FastAPI(title="Booth Agent Backend", version="2.0.0")
+# Browsers send Firebase tokens in headers rather than cross-origin cookies.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+for module in (account, booths, chat, elections, voice):
+    app.include_router(module.router)
 
 
 @app.get("/healthz")
 def healthz():
+    """Let the hosting platform check that the API is running."""
     return {"status": "ok"}
