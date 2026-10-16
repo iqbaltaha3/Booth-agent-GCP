@@ -1,6 +1,7 @@
 """Bounded coordinator ReAct loop and evidence-producing specialists."""
 
 import json
+import copy
 import logging
 import re
 from contextlib import closing
@@ -9,6 +10,8 @@ from pydantic import ValidationError
 
 from agents.contracts import CoordinatorAction, ResearchAction, SpecialistResult
 from agents.name_matching import resolve_booth, run_name_task, AmbiguousInput
+from agents.households import household_lookup, remember_voters, name_predicate, data_version
+from agents.research import research_specialist, supported as research_supported, canonical
 
 MAX_COORDINATOR_TURNS = 8
 MAX_SPECIALIST_CALLS = 8
@@ -58,9 +61,7 @@ def sql_specialist(task, slug, meta, runner):
                         if not result.facts:
                             result.errors.append("Specialist finished without successful evidence.")
                         return result
-                    if task.agent == "voter" and re.search(
-                        r"\b(?:where|having|on)\b[\s\S]*\b(?:name|relative_name)\b", action.sql, re.I
-                    ):
+                    if task.agent == "voter" and name_predicate(action.sql):
                         raise ValueError("Name predicates require name_query, not ad hoc name SQL. Ask the coordinator for a name_query task.")
                     observation = runner.gcs_data.execute_select(conn, action.sql)
                     source_id = f"{task.task_id}:q{len(result.sources) + 1}"
@@ -146,13 +147,17 @@ def portfolio_specialist(task, slug, runner):
     return result
 
 
-def run_specialist(task, slug, meta, runner):
+def run_specialist(task, slug, meta, runner, voter_context=None):
+    if task.agent == "research":
+        return research_specialist(task, slug, meta, runner)
+    if task.household_query:
+        return household_lookup(task, slug, runner.gcs_data, voter_context or {})
     if task.agent == "portfolio":
         return portfolio_specialist(task, slug, runner)
     return sql_specialist(task, slug, meta, runner)
 
 
-def run_coordinator(question, constituency_id, session_id, history, pending_state, runner):
+def run_coordinator(question, constituency_id, session_id, history, pending_state, runner, voter_context=None):
     slug = constituency_id.strip().lower()
     meta = runner.load_constituency_meta(slug)
     system = runner.load_prompt("coordinator_system.txt", **meta)
@@ -165,18 +170,27 @@ def run_coordinator(question, constituency_id, session_id, history, pending_stat
     results = dict(pending.get("results", {}))
     agent_path, corrections, fingerprints = [], [], set()
     calls = 0
+    research_calls = 0
+    voter_context = copy.deepcopy(voter_context or {})
+    trace = []
 
-    def response(answer, status, persist=False):
+    def response(answer, status, persist=False, sources=None):
         value = {"answer": runner.clean_user_answer(answer, question), "charts": [],
                  "session_id": session_id, "agent_path": agent_path, "status": status}
         value["pending_state"] = {"objective": objective, "tasks": tasks, "results": results} if persist else None
+        value["voter_context"] = voter_context
+        value["diagnostics"] = trace[-8:]
+        value["sources"] = sources or []
         return value
 
     for _ in range(MAX_COORDINATOR_TURNS):
         context = {"original_objective": objective, "latest_user_message": question,
                    "conversation": (history or [])[-12:], "tasks": tasks,
+                   "verified_voter_context": voter_context,
                    "specialist_results": results, "corrections": corrections,
                    "remaining_specialist_calls": MAX_SPECIALIST_CALLS - calls}
+        context["research_scope_supported"] = research_supported(meta)
+        context["remaining_research_calls"] = 2 - research_calls
         observations = context.pop("specialist_results")
         raw = runner.gemini_chat([
             {"role": "system", "content": system},
@@ -201,13 +215,45 @@ def run_coordinator(question, constituency_id, session_id, history, pending_stat
                 unavailable = action.status == "failed" and results and all(r["status"] == "failed" for r in results.values())
                 if not supported and not greeting and not unavailable:
                     raise ValueError("A data answer needs evidence_task_ids with successful facts. If evidence is unavailable, clarify what is missing.")
+                web = [result for result in supported if result["agent"] == "research"]
+                source_map = {source["source_id"]: source for result in web for source in result["sources"]
+                              if source.get("source_id") and canonical(source.get("url"))}
+                cited = set(re.findall(r"\[(R[^\]\s]+)\]", action.answer))
+                if cited - source_map.keys():
+                    raise ValueError("Final answer contains unknown web citations; use source_id values from cited research tasks")
+                factual_ids = {sid for result in web for fact in result["facts"] if fact.get("text") for sid in fact.get("source_ids", [])}
+                if factual_ids and not cited.intersection(factual_ids):
+                    raise ValueError("Public research findings require inline [source_id] citations in the final answer")
+                if cited and factual_ids and cited - factual_ids:
+                    raise ValueError("Cite sources supporting verified research findings, not unread search leads")
+                final_sources = [source_map[sid] for sid in dict.fromkeys(re.findall(r"\[(R[^\]\s]+)\]", action.answer))]
+                if web and not factual_ids and not cited:
+                    final_sources = list(source_map.values())[:8]
+                offered = [item["reference"] for result in supported for fact in result["facts"]
+                           for item in fact.get("voter_references", [])]
+                if action.selected_voter_reference:
+                    if action.selected_voter_reference not in offered:
+                        raise ValueError("Select a voter reference from the cited, verified lookup results")
+                    voter_context["selected_reference"] = action.selected_voter_reference
+                elif offered:
+                    choices = list(dict.fromkeys(
+                        item["reference"] for result in supported
+                        if not tasks.get(result["task_id"], {}).get("household_query")
+                        for fact in result["facts"] for item in fact.get("voter_references", [])
+                    ))
+                    if choices:
+                        voter_context["selected_reference"] = choices[0] if len(choices) == 1 else None
                 status = action.status
                 if status == "complete" and any(r["status"] != "complete" for r in results.values()):
                     status = "partial"
-                return response(action.answer, status)
+                return response(action.answer, status, sources=final_sources)
             for task in action.tasks:
                 if calls >= MAX_SPECIALIST_CALLS:
                     raise ValueError("Specialist call limit reached; finish from supported evidence or ask for clarification")
+                if task.agent == "research":
+                    if research_calls >= 2:
+                        raise ValueError("Research call budget reached; finish with available evidence and limitations")
+                    research_calls += 1
                 fingerprint = dump(task.model_dump(exclude={"task_id"}))
                 if fingerprint in fingerprints:
                     raise ValueError("Identical task already executed. Inspect its result and revise the task instead of repeating it.")
@@ -217,10 +263,28 @@ def run_coordinator(question, constituency_id, session_id, history, pending_stat
                 tasks[task.task_id] = task.model_dump()
                 logger.info("Delegating task=%s agent=%s", task.task_id, task.agent)
                 try:
-                    result = run_specialist(task, slug, meta, runner)
+                    result = run_specialist(task, slug, meta, runner, voter_context)
+                    for source in result.sources:
+                        filename = source.get("database")
+                        if filename in {"voters.db", "history.db"}:
+                            source["data_version"] = data_version(slug, runner.gcs_data, filename)
+                    remember_voters(result, slug, runner.gcs_data, voter_context)
                 except Exception as error:
                     result = SpecialistResult(task_id=task.task_id, agent=task.agent, status="failed", errors=[str(error)])
                 results[task.task_id] = result.model_dump()
+                trace.append({"task_id": task.task_id, "agent": task.agent, "status": result.status,
+                              "operation": "household_lookup" if task.household_query else "name_query" if task.name_query else "web_research" if task.research_query else "research",
+                              "filters": task.household_query.model_dump() if task.household_query else task.name_query.model_dump() if task.name_query else task.constraints,
+                              "counts": [fact.get("total", fact.get("row_count")) for fact in result.facts
+                                         if "total" in fact or "row_count" in fact],
+                              "sources": [{k: source[k] for k in ("database", "data_version", "source_id", "source_file") if k in source}
+                                          for source in result.sources]})
+                # Store bounded query diagnostics privately, never in logs or the API response.
+                for saved, source in zip(trace[-1]["sources"], result.sources):
+                    if source.get("sql"):
+                        saved["sql"] = str(source["sql"])[:4000]
+                    if "parameters" in source:
+                        saved["parameters"] = [str(value)[:500] for value in source["parameters"][:32]]
                 logger.info("Specialist task=%s status=%s", task.task_id, result.status)
                 agent_path.append(f"{task.agent}_agent")
         except (ValidationError, ValueError) as error:

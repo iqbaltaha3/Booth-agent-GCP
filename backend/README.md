@@ -22,7 +22,7 @@ app/
 
 For example, `/voter/query` checks access, opens `voters.db` read-only, validates the SQL, returns a limited number of rows, and closes the connection. `/history/query` reuses that flow for `history.db`.
 
-`services/gcs_data.py` is a small compatibility module: the unchanged `agents/local_runner.py` imports these names. The implementation lives in `services/data.py`.
+`services/gcs_data.py` is a small compatibility module for `agents/local_runner.py`. The implementation lives in `services/data.py`.
 
 ## Local setup
 
@@ -39,7 +39,11 @@ Store each constituency under `legacy-data/<slug>/`. The backend no longer uses 
 
 For cloud use, set `AGENT_LOCAL_MODE=false` to require login. Set `AGENT_ENGINE_RESOURCE_NAME` for the deployed engine; without it, chat still uses the local runner. Set `GCS_DATA_BUCKET` and Google application credentials for cloud storage. Firebase initialization failures now return an error instead of granting local access.
 
-Cloud file downloads are cached for the process lifetime; restart the service to read updated files. Conversation history is in memory, belongs to a user and constituency, and disappears on restart. It is not shared between server instances.
+Cloud file downloads are cached for the process lifetime; restart the service to read updated files. With `SESSION_STORE=auto`, Cloud Run uses Firestore for conversation history, pending tasks and verified voter references. Local runs use process memory. See the root README for database, IAM, expiry and configuration requirements. Storage failures do not fall back to empty local memory.
+
+Completed individual lookups can retain a selected voter reference. Household
+follow-ups resolve that reference against the current voter file and use the
+original address values. Display capitalization does not become a lookup key.
 
 ## Verification
 

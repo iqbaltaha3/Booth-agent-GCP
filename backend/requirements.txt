@@ -8,6 +8,7 @@ requests>=2.31.0
 # Google storage, login, and deployed AI runtime
 google-cloud-storage>=2.18.0
 firebase-admin>=6.5.0
+google-cloud-firestore>=2.21.0
 google-cloud-aiplatform>=1.60.0
 # Constituency configuration read by the bundled agent runner
 PyYAML>=6.0

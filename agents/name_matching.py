@@ -7,6 +7,7 @@ from contextlib import closing
 from functools import lru_cache
 
 from agents.contracts import NameCandidates, SpecialistResult, SpecialistTask
+from agents.households import normalized_station
 
 
 def tokens(value: str) -> list[str]:
@@ -49,7 +50,7 @@ def resolve_booth(identifier: str, slug: str, data) -> dict:
         number = str(row.get("part_no") or row.get("part_number") or "").strip()
         digits = re.search(r"\d+", number)
         if (part and digits and int(part[1]) == int(digits[0])) or (
-            not part and name.casefold() == identifier.strip().casefold()
+            not part and normalized_station(name) == normalized_station(identifier)
         ):
             item = {"booth_name": name, "part_number": f"Part_{int(digits[0])}" if digits else number}
             if item not in matches:
@@ -102,13 +103,19 @@ def run_name_task(task: SpecialistTask, slug: str, data, chat, parse) -> Special
                 if "polling_station" not in columns:
                     raise ValueError("Voter roll has no polling_station column")
                 # Discover the exact encoding actually present in this roll.
-                labels = {resolved["booth_name"].casefold(), resolved["part_number"].casefold(), resolved["part_number"].split("_")[-1]}
+                labels = {normalized_station(resolved["booth_name"]), resolved["part_number"].casefold(), resolved["part_number"].split("_")[-1]}
                 stations = [r[0] for r in conn.execute("SELECT DISTINCT polling_station FROM voters")
-                            if str(r[0]).strip().casefold() in labels]
+                            if normalized_station(r[0]) in labels]
                 if len(stations) != 1:
                     raise AmbiguousInput("The booth mapping does not uniquely identify a polling_station in the voter roll. Confirm the roll's exact polling station.")
-                if "polling_station" in filters and str(filters["polling_station"]) != str(stations[0]):
+                if "polling_station" in filters and normalized_station(filters["polling_station"]) != normalized_station(stations[0]):
                     raise ValueError("Conflicting booth and polling_station filters")
+                filters["polling_station"] = stations[0]
+            elif "polling_station" in filters:
+                stations = [row[0] for row in conn.execute("SELECT DISTINCT polling_station FROM voters")
+                            if normalized_station(row[0]) == normalized_station(filters["polling_station"])]
+                if len(stations) != 1:
+                    raise AmbiguousInput("Please confirm the polling station; its supplied spelling does not resolve uniquely.")
                 filters["polling_station"] = stations[0]
             allowed = {"polling_station", "region", "house_no", "relation_type", "gender", "age", "caste", "social_category", "religion", "epic_id"}
             for column, value in filters.items():

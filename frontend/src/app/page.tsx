@@ -19,6 +19,7 @@ import {
   synthesizeSpeech,
   type Constituency,
   type ChatResponse,
+  type WebSource,
   type BoothOption,
   type BoothRegion,
   type BoothPortfolioResponse,
@@ -32,7 +33,30 @@ type Msg = {
   text: string;
   agentPath?: string[];
   latencyMs?: number;
+  sources?: WebSource[];
 };
+
+function citationParts(message: Msg) {
+  return message.text.split(/(\[R[a-f0-9]{12}\])/g).map((part, index) => {
+    const sourceIndex = message.sources?.findIndex((s) => `[${s.source_id}]` === part) ?? -1;
+    const source = sourceIndex >= 0 ? message.sources?.[sourceIndex] : undefined;
+    return source && /^https?:\/\//i.test(source.url) ? (
+      <a key={index} href={source.url} target="_blank" rel="noopener noreferrer"
+         title={source.title} className="font-medium text-blue-700 underline">[{sourceIndex + 1}]</a>
+    ) : part;
+  });
+}
+
+function shareableAnswer(message: Msg) {
+  let text = message.text;
+  for (const [index, source] of (message.sources || []).entries()) {
+    text = text.replaceAll(`[${source.source_id}]`, `[${index + 1}]`);
+  }
+  if (message.sources?.length) {
+    text += "\n\n" + message.sources.map((s, i) => `[${i + 1}] ${s.title}\n${s.url}`).join("\n");
+  }
+  return text;
+}
 
 type Screen = "login" | "select" | "chat";
 type WorkspaceTab = "chat" | "reports";
@@ -500,6 +524,7 @@ export default function HomePage() {
             text: res.answer,
             agentPath: res.agent_path,
             latencyMs: res.latency_ms,
+            sources: res.sources || [],
           },
         ]);
       } catch (err) {
@@ -573,7 +598,7 @@ export default function HomePage() {
     setError("");
     try {
       const ttsLang = lang === "hi" ? "hi-IN" : "en-IN";
-      const blob = await synthesizeSpeech(msg.text, token, ttsLang);
+      const blob = await synthesizeSpeech(msg.text.replace(/\[R[a-f0-9]{12}\]/g, ""), token, ttsLang);
       stopPlaybackRef.current = playAudioBlob(blob);
       // Clear playing state when audio ends (playAudioBlob cleans up on end)
       setTimeout(() => {
@@ -854,8 +879,26 @@ export default function HomePage() {
               className={m.role === "user" ? "bubble-user" : "bubble-arjun"}
             >
               <div className="whitespace-pre-wrap text-[15px] leading-relaxed">
-                {m.text}
+                {citationParts(m)}
               </div>
+              {!!m.sources?.length && (
+                <div className="mt-3 space-y-2 border-t border-slate-100 pt-2 text-xs text-slate-500">
+                  <p className="font-medium">{lang === "hi" ? "स्रोत" : "Sources"}</p>
+                  {m.sources.map((source, index) => (
+                    <div key={source.source_id}>
+                      <a href={/^https?:\/\//i.test(source.url) ? source.url : undefined}
+                         target="_blank" rel="noopener noreferrer" className="text-blue-700 underline">
+                        [{index + 1}] {source.title || source.url}
+                      </a>
+                      <p>{source.published_at || (lang === "hi" ? "तारीख अज्ञात" : "Date unknown")}
+                        {" · "}{source.read_status === "page_read"
+                          ? (lang === "hi" ? "पृष्ठ पढ़ा गया" : "Page read")
+                          : (lang === "hi" ? "खोज संकेत; पृष्ठ नहीं पढ़ा गया" : "Search lead; page not read")}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
               {m.role === "arjun" && (
                 <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-2">
                   <button
@@ -873,14 +916,14 @@ export default function HomePage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => copyText(m.text)}
+                    onClick={() => copyText(shareableAnswer(m))}
                     className="text-xs font-medium text-slate-500 hover:text-navy-900"
                   >
                     {t(lang, "copy")}
                   </button>
                   <button
                     type="button"
-                    onClick={() => shareText(m.text)}
+                    onClick={() => shareText(shareableAnswer(m))}
                     className="text-xs font-medium text-slate-500 hover:text-navy-900"
                   >
                     {t(lang, "share")}

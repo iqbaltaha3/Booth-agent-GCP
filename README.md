@@ -136,9 +136,60 @@ When clarification is necessary, `/agent/chat` returns the question in `answer`
 and `status: "needs_clarification"`. Send the user's reply with the same
 `session_id`. The backend supplies recent conversation history and pending tasks
 to resume the original objective. State is private to the user and locked to the
-selected constituency. **Session storage is currently process memory**: restarts
-lose it and multiple Cloud Run instances do not share it. A shared durable session
-store is required before relying on clarification across production instances.
+selected constituency. Completed individual lookups retain server-verified voter
+references, including original identifiers and a voter-file checksum. A unique
+lookup can become the selected reference; a multi-person result is not silently
+reduced to its first person. Household follow-ups use this reference instead of
+reconstructing addresses from formatted answers.
+
+`SESSION_STORE=auto` (default) uses Firestore on Cloud Run (`K_SERVICE` is present)
+and process memory locally. Firestore sessions survive restarts and are shared
+between instances. A short transaction acquires a 15-minute lease, then model
+calls run outside the transaction; overlapping turns receive HTTP 409. Failed
+turns release the lease without overwriting previous context. Storage failure
+returns HTTP 503 rather than silently starting a conversation with lost memory.
+
+Sessions retain 24 messages (the coordinator receives the latest 12), pending
+tasks, up to 40 verified voter references, and 16 bounded task diagnostics. Sessions
+expire after 24 hours by default. Diagnostics include supplied filters, counts,
+source identifiers and bounded query text/parameters; they remain server-side and
+are not returned by the chat API.
+
+### Shared session setup
+
+Before deploying this version, enable Firestore Native mode in the application
+project, provision the selected database, and grant the backend runtime service
+account `roles/datastore.user`. The collection `booth_agent_sessions` must remain
+unreadable and unwritable by browser/Firebase clients; only the server uses it.
+Session payloads are JSON strings to support query results containing nested arrays.
+
+Configuration:
+
+```text
+SESSION_STORE=auto                 # firestore on Cloud Run; memory locally
+SESSION_PROJECT=my-booth-agent      # optional; otherwise Google credentials/project discovery
+SESSION_FIRESTORE_DATABASE=booth-agent-sessions
+SESSION_TTL_HOURS=24
+```
+
+For physical expiry cleanup, configure a Firestore TTL policy on `expires_at` for
+the `booth_agent_sessions` collection group. The application ignores expired
+sessions even before Firestore deletes them. `SESSION_STORE=memory` is available
+for local tests; it does not provide shared memory across server instances.
+
+### Household follow-ups
+
+`household_query` accepts a verified voter reference or an EPIC, or explicit
+`house_no` plus `polling_station`. It cannot be combined with a name query or extra
+task constraints. Explicit station names are resolved using case and whitespace
+normalization; ambiguous or unknown stations require clarification. House-number
+punctuation is preserved. An anchored lookup reads the original stored address and
+verifies the anchor is included before optionally excluding that person.
+
+Counts cover all matching records; display is capped at 20. The original person's
+name, age or gender is not retained as a household filter. A voter-file checksum
+change invalidates old references and requires a fresh lookup. Matching voter-roll
+records do not prove current residence or family relationships.
 
 ### Hindi voter-name matching
 
@@ -162,6 +213,63 @@ was searched. Schema and spelling interpretation still require model judgment.
 
 Contracts: `agents/contracts.py`. Coordinator and specialists: `agents/runtime.py`.
 Name matching: `agents/name_matching.py`.
+Verified references and households: `agents/households.py`.
+Shared session adapters: `backend/app/services/sessions.py`.
+
+### Public Research Agent
+
+The fourth specialist, `research`, is adapted from the supplied Local Research
+Agent demo. The coordinator selects it automatically for public news, recent civic
+issues, public candidate activities and official announcements. It can combine web
+reporting with local aggregate/election evidence; private voter records, household
+addresses, EPICs, conversation history and voter context are not passed to search
+providers. Database-only questions keep using the existing specialists.
+
+The pilot is limited to constituencies configured in Prayagraj/Allahabad or
+Kaushambi/Kausambi district, Uttar Pradesh. Gyanpur/Bhadohi is outside this pilot.
+District relevance does not establish constituency or village membership; the
+registry is a sampled source guide, not a validated boundary gazetteer. Ambiguous
+places require clarification. District-wide or uncertain findings retain those
+labels rather than being presented as constituency facts.
+
+`research_query` includes `public_question`, `scope`, optional `locality`,
+`time_sensitive`, optional paired `start_date`/`end_date`, and `max_pages` (1–8).
+For recent tasks the default is the last 30 days through today in Asia/Kolkata.
+Historical/general questions skip publication-date filtering and must state data
+years explicitly. The coordinator resolves follow-up subjects before delegating.
+
+Retrieval uses Tavily only: up to four Hindi/English planned queries plus two
+source-directed searches, three concurrent searches, at most two HTTP attempts,
+domain-diverse reranking and up to eight page extractions. Existing Gemini/GCP
+authentication is reused for planning, ranking and structured findings. The default
+research deadline is 90 seconds (`RESEARCH_TIMEOUT_SECONDS`, capped at 180), with
+at most two research calls per user turn. Interrupted retrieval returns partial
+evidence or an explicit failure. Research coverage is not exhaustive.
+
+Source IDs survive coordinator synthesis and become numbered, clickable citations
+in the UI. Copy/share include source URLs; audio omits citation identifiers. Chat
+responses and session history include a `sources` list with title, public URL,
+publication date (possibly unknown), search timestamp, category and read status.
+Raw page extractions stay within the specialist call. `snippet_only` sources are
+search leads, not confirmed findings. Unknown citations are rejected; factual web
+answers require citations to findings from read pages. Identifier validation does
+not independently prove claim support. Reporting, official statements, allegations,
+conflicts, geographic uncertainty and missing dates must remain distinguishable.
+
+### Tavily configuration
+
+Store the Tavily key in Secret Manager as `tavily-api-key` in the deployment project.
+Grant the backend runtime account `roles/secretmanager.secretAccessor` on that
+secret. The backend Cloud Build configurations bind it to `TAVILY_API_KEY` and use
+`--update-env-vars` so other runtime configuration is preserved. Provision this
+secret before deploying in another project. Local development can set
+`TAVILY_API_KEY` in the process environment or the backend's local `.env`.
+Missing credentials disable research with an explicit result; electoral data tools
+continue to operate. Keys and extracted pages are not written into source files.
+
+API references: [Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search)
+and [Tavily Extract](https://docs.tavily.com/documentation/api-reference/endpoint/extract).
+Implementation: `agents/research.py`; pilot registry: `agents/research_sources.json`.
 
 Run deterministic regression checks without credentials or real voter data:
 

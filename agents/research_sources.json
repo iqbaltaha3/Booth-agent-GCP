@@ -1,0 +1,93 @@
+{
+  "researched_on": "2026-10-16",
+  "scope": "Prayagraj and Kaushambi/UP pilot; sampled sources, no completeness guarantee",
+  "sources": [
+    {
+      "domain": "amarujala.com",
+      "type": "local_reporting",
+      "entry": "https://www.amarujala.com/uttar-pradesh/allahabad"
+    },
+    {
+      "domain": "livehindustan.com",
+      "type": "local_reporting",
+      "entry": "https://www.livehindustan.com/uttar-pradesh/prayagraj"
+    },
+    {
+      "domain": "jagran.com",
+      "type": "local_reporting",
+      "entry": "https://www.jagran.com/uttar-pradesh/prayagraj"
+    },
+    {
+      "domain": "bhaskar.com",
+      "type": "local_reporting",
+      "entry": "https://www.bhaskar.com/",
+      "note": "Local Prayagraj and smaller-locality articles verified in search; access may vary"
+    },
+    {
+      "domain": "prayagraj.nic.in",
+      "type": "official",
+      "entry": "https://prayagraj.nic.in/",
+      "note": "District geography is not identical to constituency geography"
+    },
+    {
+      "domain": "prayagrajdivision.nic.in",
+      "type": "official",
+      "entry": "https://prayagrajdivision.nic.in/notices/"
+    },
+    {
+      "domain": "eci.gov.in",
+      "type": "official",
+      "entry": "https://www.eci.gov.in/affidavit-portal"
+    },
+    {
+      "domain": "myneta.info",
+      "type": "affidavit_repository",
+      "entry": "https://www.myneta.info/",
+      "note": "Self-declarations at election time; not live candidate status"
+    },
+    {
+      "domain": "kaushambi.nic.in",
+      "type": "official",
+      "entry": "https://kaushambi.nic.in/constituencies/"
+    },
+    {
+      "domain": "censusindia.gov.in",
+      "type": "official",
+      "entry": "https://www.censusindia.gov.in/nada/index.php/catalog/11361",
+      "note": "Historical C-01 religion data (2011); read geographic scope and reference year"
+    }
+  ],
+  "geography_reference": "https://prayagraj.nic.in/blo-list/",
+  "limitations": [
+    "No publisher API or crawling permission inferred from public accessibility",
+    "No complete village coverage guarantee",
+    "Local YouTube channels and party accounts require separate identity vetting; not integrated in this version",
+    "Planning aliases are model suggestions, not validated boundary membership"
+  ],
+  "additional_local_entries": [
+    "https://www.amarujala.com/uttar-pradesh/kaushambi",
+    "https://www.livehindustan.com/uttar-pradesh/kausambi/news-6"
+  ],
+  "geography": {
+    "aliases": [
+      [
+        "Prayagraj",
+        "Allahabad",
+        "प्रयागराज",
+        "इलाहाबाद"
+      ],
+      [
+        "Kaushambi",
+        "Kausambi",
+        "कौशाम्बी",
+        "कौशांबी"
+      ]
+    ],
+    "reference_urls": [
+      "https://kaushambi.nic.in/constituencies/",
+      "https://prayagraj.nic.in/blo-list/",
+      "https://prayagraj.nic.in/soraon/"
+    ],
+    "warning": "Alias seed only; not a verified village-to-constituency gazetteer. Kaushambi in Ghaziabad must be disambiguated from Kaushambi district."
+  }
+}

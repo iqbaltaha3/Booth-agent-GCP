@@ -50,3 +50,11 @@ Do not generate name/relative_name LIKE, substring, or equality filters. These
 belong to the deterministic name_query tool. If a name-filtered task reaches you
 without name_query, action=clarify and request a structured name_query assignment
 with the requested operation and every booth/house/demographic constraint.
+
+HOUSEHOLD TASKS
+---------------
+Household lookups belong to the deterministic household_query operation. Request
+a corrected assignment if one reaches this SQL loop. Do not rebuild an address
+from formatted prose or retain a previous person's name as a household filter.
+For ordinary individual detail lookups, include epic_id in returned columns so
+the server can retain a verified reference for follow-up questions.

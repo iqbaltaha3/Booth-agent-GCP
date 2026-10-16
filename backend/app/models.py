@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, HttpUrl
 
 
 class ChatRequest(BaseModel):
@@ -11,6 +11,16 @@ class ChatRequest(BaseModel):
     question: str
     constituency_id: str
     session_id: str | None = None
+
+
+class WebSource(BaseModel):
+    source_id: str
+    title: str
+    url: HttpUrl
+    published_at: str | None = None
+    searched_at: str
+    read_status: Literal["page_read", "snippet_only"]
+    source_type: str
 
 
 class ChatResponse(BaseModel):
@@ -22,6 +32,7 @@ class ChatResponse(BaseModel):
     agent_path: list[str] = Field(default_factory=list)
     latency_ms: int | None = None
     status: Literal["complete", "partial", "needs_clarification", "failed"] = "complete"
+    sources: list[WebSource] = Field(default_factory=list)
 
 
 class SessionHistoryResponse(BaseModel):

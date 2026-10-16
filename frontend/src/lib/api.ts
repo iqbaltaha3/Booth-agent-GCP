@@ -19,6 +19,16 @@ export type Constituency = {
   product_tagline?: string;
 };
 
+export type WebSource = {
+  source_id: string;
+  title: string;
+  url: string;
+  published_at: string | null;
+  searched_at: string;
+  read_status: "page_read" | "snippet_only";
+  source_type: string;
+};
+
 export type ChatResponse = {
   answer: string;
   charts: unknown[];
@@ -26,6 +36,7 @@ export type ChatResponse = {
   agent_path: string[];
   latency_ms?: number;
   status?: "complete" | "partial" | "needs_clarification" | "failed";
+  sources?: WebSource[];
 };
 
 export type BoothOption = {

@@ -10,6 +10,7 @@ from app.config import get_settings
 def run_chat(
     question: str, constituency_id: str, session_id: str | None = None,
     history: list[dict] | None = None, pending_state: dict | None = None,
+    voter_context: dict | None = None,
 ) -> dict:
     """Choose the configured AI runtime and measure its response time."""
     settings = get_settings()
@@ -22,9 +23,10 @@ def run_chat(
         result = run_local_agent(
             question=question, constituency_id=constituency_id, session_id=session_id,
             history=history, pending_state=pending_state,
+            voter_context=voter_context,
         )
     else:
-        result = _call_agent_engine(question, constituency_id, session_id, history, pending_state)
+        result = _call_agent_engine(question, constituency_id, session_id, history, pending_state, voter_context)
     result.setdefault("session_id", session_id)
     result["latency_ms"] = int((time.perf_counter() - started) * 1000)
     return result
@@ -33,6 +35,7 @@ def run_chat(
 def _call_agent_engine(
     question: str, constituency_id: str, session_id: str,
     history: list[dict] | None = None, pending_state: dict | None = None,
+    voter_context: dict | None = None,
 ) -> dict:
     """Use Google's SDK and normalize the deployed engine's response."""
     import vertexai
@@ -44,7 +47,7 @@ def _call_agent_engine(
         engine = agent_engines.get(settings.agent_engine_resource_name)
         response = engine.query(
             input={"question": question, "constituency_id": constituency_id, "session_id": session_id,
-                   "history": history or [], "pending_state": pending_state}
+                   "history": history or [], "pending_state": pending_state, "voter_context": voter_context or {}}
         )
     except Exception as error:
         logging.exception("Agent Engine call failed")
@@ -58,4 +61,7 @@ def _call_agent_engine(
         "agent_path": response.get("agent_path") or [],
         "status": response.get("status", "complete"),
         "pending_state": response.get("pending_state"),
+        "voter_context": response.get("voter_context", voter_context or {}),
+        "diagnostics": response.get("diagnostics", []),
+        "sources": response.get("sources", []),
     }

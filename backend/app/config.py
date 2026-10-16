@@ -6,6 +6,7 @@ Reads from environment variables / Secret Manager in production.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -36,6 +37,15 @@ class Settings(BaseSettings):
     agent_engine_resource_name: str | None = None
     # For local/dev: call agents in-process instead of Agent Engine
     agent_local_mode: bool = True
+
+    # auto uses Firestore on Cloud Run and process memory for local development.
+    session_store: Literal["auto", "memory", "firestore"] = "auto"
+    session_project: str | None = None
+    session_firestore_database: str = "booth-agent-sessions"
+    session_ttl_hours: int = 24
+
+    tavily_api_key: str = ""
+    research_timeout_seconds: int = 90
 
     # Sarvam voice
     sarvam_api_key: str = ""

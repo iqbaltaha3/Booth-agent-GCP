@@ -46,10 +46,7 @@ class BackendTests(unittest.TestCase):
         """Restore application settings and clear test conversations."""
         self.settings.local_data_root = self.previous_root
         app.dependency_overrides.clear()
-        chat._SESSION_HISTORY.clear()
-        chat._SESSION_SEATS.clear()
-        chat._SESSION_PENDING.clear()
-        chat._SESSION_LOCKS.clear()
+        chat.get_store().clear()
         self.directory.cleanup()
 
     def test_account_manifest(self):
@@ -166,7 +163,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(response.json()["status"], "complete")
             self.assertEqual(runtime.call_args.kwargs["pending_state"], pending)
             self.assertEqual(len(runtime.call_args.kwargs["history"]), 2)
-            self.assertNotIn(("alice", sid), chat._SESSION_PENDING)
+            self.assertIsNone(chat.get_store().read("alice", sid)["pending_state"])
             self.user["uid"] = "bob"
             self.client.post("/agent/chat", json={"question": "Hello", "constituency_id": "seat", "session_id": sid})
             self.assertEqual(runtime.call_args.kwargs["history"], [])
@@ -180,6 +177,36 @@ class BackendTests(unittest.TestCase):
             response = self.client.post("/agent/chat", json={"question": "2022", "constituency_id": "other", "session_id": "sid"})
             self.assertEqual(response.status_code, 403)
             self.assertEqual(runtime.call_count, 1)
+
+    def test_completed_voter_context_survives_the_next_api_turn(self):
+        context = {"selected_reference": "verified-person", "references": {}}
+        with patch("app.routes.chat.run_chat", side_effect=[
+            {"answer": "Found the person", "status": "complete", "voter_context": context},
+            {"answer": "Two records", "status": "complete", "voter_context": context},
+        ]) as runtime:
+            self.client.post("/agent/chat", json={"question": "Show details", "constituency_id": "seat", "session_id": "sid"})
+            response = self.client.post("/agent/chat", json={"question": "Same house", "constituency_id": "seat", "session_id": "sid"})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(runtime.call_args.kwargs["voter_context"], context)
+            self.assertNotIn("voter_context", response.json())
+
+    def test_storage_failure_never_falls_back_to_empty_memory(self):
+        with patch("app.routes.chat.get_store", side_effect=RuntimeError("storage unavailable")), patch("app.routes.chat.run_chat") as runtime:
+            response = self.client.post("/agent/chat", json={"question": "Same house", "constituency_id": "seat"})
+        self.assertEqual(response.status_code, 503)
+        runtime.assert_not_called()
+
+    def test_web_sources_survive_chat_and_history_without_extracted_content(self):
+        source = {"source_id": "R123456789abc", "title": "Fictional public notice", "url": "https://example.com/notice",
+                  "published_at": None, "searched_at": "2026-10-16T00:00:00Z", "read_status": "page_read",
+                  "source_type": "official", "page_text": "Do not expose raw extraction"}
+        with patch("app.routes.chat.run_chat", return_value={"answer": "Notice [R123456789abc].", "sources": [source]}):
+            result = self.client.post("/agent/chat", json={"question": "Public notices?", "constituency_id": "seat", "session_id": "web-sid"})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["sources"][0]["url"], "https://example.com/notice")
+        self.assertNotIn("page_text", result.json()["sources"][0])
+        history = self.client.get("/agent/sessions/web-sid/history").json()
+        self.assertNotIn("page_text", history["turns"][-1]["sources"][0])
 
     def test_voice_contracts(self):
         """Voice endpoints accept browser uploads and return WAV bytes."""

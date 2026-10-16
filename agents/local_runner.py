@@ -68,11 +68,13 @@ def _to_gemini_payload(messages: List[Dict[str, str]], temperature: float, max_t
     return payload
 
 
-def gemini_chat(messages: List[Dict[str, str]], temperature: float = 0.1, max_tokens: int = 4096) -> str:
+def gemini_chat(messages: List[Dict[str, str]], temperature: float = 0.1, max_tokens: int = 4096, deadline: float | None = None) -> str:
     model = DEFAULT_MODEL
     if model.startswith("models/"):
         model = model[len("models/") :]
     if not GEMINI_API_KEY:
+        if deadline is not None:
+            return vertex_deadline_chat(messages, model, temperature, max_tokens, deadline)
         return vertex_gemini_chat(messages, model, temperature, max_tokens)
     data = json.dumps(_to_gemini_payload(messages, temperature, max_tokens)).encode("utf-8")
     req = urllib.request.Request(
@@ -87,7 +89,10 @@ def gemini_chat(messages: List[Dict[str, str]], temperature: float = 0.1, max_to
     )
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            remaining = TIMEOUT if deadline is None else min(TIMEOUT, deadline - time.monotonic())
+            if remaining <= 0:
+                return "<<LLM_ERROR: deadline exceeded>>"
+            with urllib.request.urlopen(req, timeout=remaining) as resp:
                 parsed = json.loads(resp.read().decode("utf-8"))
             candidates = parsed.get("candidates") or []
             if not candidates:
@@ -97,12 +102,39 @@ def gemini_chat(messages: List[Dict[str, str]], temperature: float = 0.1, max_to
             return text or "<<LLM_ERROR: empty response>>"
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504) and attempt < MAX_ATTEMPTS:
-                time.sleep(min(30, 2 ** attempt))
+                delay = min(30, 2 ** attempt)
+                if deadline is not None and time.monotonic() + delay >= deadline:
+                    return "<<LLM_ERROR: deadline exceeded>>"
+                time.sleep(delay)
                 continue
             return f"<<LLM_ERROR: HTTP {e.code}>>"
         except Exception as e:
             return f"<<LLM_ERROR: {e}>>"
     return "<<LLM_ERROR: retries exhausted>>"
+
+
+def vertex_deadline_chat(messages, model, temperature, max_tokens, deadline):
+    """Use the same Vertex model/ADC through REST with a per-research deadline."""
+    try:
+        import google.auth
+        from google.auth.transport.requests import AuthorizedSession
+        credentials, detected_project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT") or detected_project
+        location = os.environ.get("REGION") or os.environ.get("GCP_REGION") or "asia-south1"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not project:
+            return "<<LLM_ERROR: deadline or project unavailable>>"
+        host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
+        url = f"https://{host}/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent"
+        with AuthorizedSession(credentials) as session:
+            response = session.post(url, json=_to_gemini_payload(messages, temperature, max_tokens),
+                                    timeout=min(TIMEOUT, remaining), max_allowed_time=remaining)
+            if not response.ok:
+                return f"<<LLM_ERROR: Vertex HTTP {response.status_code}>>"
+            parts = ((response.json().get("candidates") or [{}])[0].get("content") or {}).get("parts", [])
+            return "".join(p.get("text", "") for p in parts if not p.get("thought")).strip() or "<<LLM_ERROR: empty response>>"
+    except Exception:
+        return "<<LLM_ERROR: Vertex research request failed>>"
 
 
 def vertex_gemini_chat(
@@ -287,6 +319,7 @@ def run_local_agent(
     session_id: str = "",
     history: list[dict] | None = None,
     pending_state: dict | None = None,
+    voter_context: dict | None = None,
 ) -> Dict[str, Any]:
     """Run the coordinator with server-owned conversation and pending task state."""
     from agents.runtime import run_coordinator
@@ -294,4 +327,5 @@ def run_local_agent(
     return run_coordinator(
         question, constituency_id, session_id, history, pending_state,
         runner=sys.modules[__name__],
+        voter_context=voter_context,
     )
