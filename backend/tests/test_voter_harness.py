@@ -99,6 +99,52 @@ class VoterHarnessTests(unittest.TestCase):
         self.assertEqual(result['answer'],'There are 3 Muslim voters.')
         self.assertEqual(result['voter_context']['population']['filters'][0]['value'],'Muslim')
 
+    def test_distinct_region_list_advances_after_repeated_truncated_sql(self):
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.executemany(
+                "INSERT INTO voters(region) VALUES (?)",
+                [(f"Region {n:03}",) for n in range(85)],
+            )
+        first = "SELECT DISTINCT region FROM voters ORDER BY region"
+        second = first + " LIMIT -1 OFFSET 80"
+        replies = iter([
+            {"action": "sql", "sql": first},
+            {"action": "sql", "sql": first},
+            {"action": "sql", "sql": second},
+            {"action": "finish", "status": "complete"},
+        ])
+        model_inputs = []
+        def chat(messages, **kwargs):
+            model_inputs.append(messages[1]["content"])
+            return json.dumps(next(replies))
+        with patch.object(runner, "gemini_chat", side_effect=chat):
+            result = run_specialist(task({"operation": "explore", "group_by": ["region"]}),
+                                    "seat", {}, runner, {}, "list all unique regions")
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(len(result.sources), 2)
+        self.assertIn("OFFSET 80", model_inputs[2])
+        self.assertEqual(sum(len(item["rows"]) for item in result.facts), 87)
+
+    def test_coordinator_filters_percentage_answer_from_complete_grouped_counts(self):
+        assignment = task({"operation": "aggregate", "group_by": ["region"]})
+        coordinator = iter([
+            {"action": "delegate", "tasks": [assignment.model_dump()]},
+            {"action": "finish", "answer": "East and West are over 50% Muslim.",
+             "evidence_task_ids": ["v"]},
+        ])
+        specialist = iter([
+            {"action": "sql", "sql": "SELECT region, SUM(CASE WHEN religion = 'Muslim' THEN 1 ELSE 0 END) AS muslim_count, COUNT(*) AS total_count FROM voters GROUP BY region ORDER BY region"},
+            {"action": "finish", "status": "complete"},
+        ])
+        def chat(messages, **kwargs):
+            replies = specialist if kwargs.get("response_schema", {}).get("title") == "ResearchAction" else coordinator
+            return json.dumps(next(replies))
+        with patch.object(runner, "gemini_chat", side_effect=chat):
+            result = runner.run_local_agent("list regions where Muslim population is more than 50%", "seat")
+        self.assertEqual(result["status"], "complete")
+        self.assertIn("East: 66.67% (2 of 3)", result["answer"])
+        self.assertNotIn("West", result["answer"])
+
     def test_provider_failure_does_not_create_population(self):
         with patch.object(runner,'gemini_chat',return_value='<<LLM_ERROR: provider unavailable>>'):
             result=self.execute({'operation':'count','filters':[{'field':'religion','value':'Translated category'}]})

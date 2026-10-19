@@ -39,7 +39,7 @@ from agents.elections import (
 )
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from agents.presentation import partial_reason as explain_partial
+from agents.presentation import partial_reason as explain_partial, recovery_question
 from agents.completion import (
     infer_requirements,
     resolve_requirements,
@@ -58,6 +58,10 @@ from agents.research import (
     supported as research_supported,
     canonical,
     validate_public_assignment,
+)
+from agents.result_contracts import (
+    distinct_list_request, distinct_values, render_distinct,
+    share_threshold_request, qualifying_shares, render_shares, shares_match_source,
 )
 from agents.voter import (
     prepare_voter_request,
@@ -123,7 +127,8 @@ def sql_specialist(task, slug, meta, runner, question=""):
 
             memory = []
             last_correction = None
-            for _ in range(5 if task.agent == "voter" else 6):
+            seen_sql = {}
+            for _ in range(8 if task.agent == "voter" else 6):
                 if execution.remaining(reserve=15) <= 0:
                     result.errors.append("deadline_exceeded")
                     result.failure_code = "deadline_exceeded"
@@ -131,7 +136,8 @@ def sql_specialist(task, slug, meta, runner, question=""):
                 conn.set_progress_handler(lambda: int(execution.remaining(reserve=15) <= 0), 10000)
                 raw = runner.gemini_chat([
                     {"role": "system", "content": system},
-                    {"role": "user", "content": dump({"task": task.model_dump(), "original_question": question}) + "\n" +
+                    {"role": "user", "content": dump({"task": task.model_dump(), "original_question": question,
+                        "result_contract": share_threshold_request(question) or ({"distinct_list_field": distinct_list_request(question)} if distinct_list_request(question) else None)}) + "\n" +
                      runner.wrap_electoral(dump({"schema": schema, "source_catalog": voter_catalog(slug, runner.gcs_data) if task.agent == "voter" else None, "resolved_population": resolved_population, "observations": memory[-4:]}))},
                 ], temperature=0.0, deadline=execution.deadline(reserve=15), response_schema=ResearchAction.model_json_schema())
                 if raw.startswith("<<LLM_ERROR"):
@@ -153,16 +159,44 @@ def sql_specialist(task, slug, meta, runner, question=""):
                             final_facts = [f for f in result.facts if f.get("source_id") in action.evidence_source_ids]
                         else:
                             final_facts = result.facts
+                        distinct_field = distinct_list_request(question) if task.agent == "voter" else None
+                        distinct_complete = (
+                            distinct_values([{"facts": final_facts, "sources": result.sources}], distinct_field)[1]
+                            if distinct_field else False
+                        )
+                        if distinct_field and action.status == "complete" and not distinct_complete:
+                            execution.record({"event": "distinct_list_incomplete", "task_id": task.task_id})
+                            memory.append({"error": "The distinct list is incomplete. Continue the ordered query from the next_page_offset, cite all pages, and finish only after the final short page."})
+                            continue
                         result.facts = final_facts
                         result.limitations.extend(action.limitations)
-                        if any(f.get("truncated") for f in result.facts):
+                        if any(f.get("truncated") for f in result.facts) and not distinct_complete:
                             result.gaps.append("Some returned results are incomplete; they do not establish a full comparison or absence of matches.")
                         result.gaps.extend(action.gaps)
                         result.status = ("partial" if result.gaps else action.status) if result.facts else "failed"
                         if not result.facts:
                             result.errors.append("Specialist finished without successful evidence.")
                         return result
+                    sql_key = " ".join(action.sql.casefold().split())
+                    if sql_key in seen_sql:
+                        prior = seen_sql[sql_key]
+                        execution.record({"event": "sql_repeated", "task_id": task.task_id, "truncated": prior["truncated"]})
+                        hint = (
+                            f"That exact SQL already returned a truncated page. Move to the next page with stable ORDER BY and LIMIT -1 OFFSET {prior['next_offset']}; do not repeat this page."
+                            if prior["truncated"] else
+                            "That exact SQL already ran. Use its observation or change the SQL to obtain missing evidence."
+                        )
+                        memory.append({"error": hint})
+                        continue
                     observation = runner.gcs_data.execute_select(conn, action.sql)
+                    offset = re.search(r"\bOFFSET\s+(\d+)", action.sql, re.I)
+                    observation["next_page_offset"] = (int(offset[1]) if offset else 0) + observation["row_count"] if observation["truncated"] else None
+                    if observation["truncated"]:
+                        observation["pagination_hint"] = (
+                            f"This is only one page. For a complete list use stable ORDER BY and LIMIT -1 OFFSET {observation['next_page_offset']}; "
+                            "for a percentage filter, aggregate and filter before paging."
+                        )
+                    seen_sql[sql_key] = {"truncated": observation["truncated"], "next_offset": observation["next_page_offset"]}
                     if task.voter_request:
                         from agents.sql_observations import count_observation
                         observation = count_observation(action.sql, observation)
@@ -467,6 +501,16 @@ class Coordinator:
     def response(
         self, answer, status, persist=False, sources=None, partial_reason=None
     ):
+        has_unfinished_facts = any(
+            result.get("facts") and result.get("status") in {"complete", "partial"}
+            for result in self.results.values()
+        )
+        if status == "partial" or (status == "failed" and has_unfinished_facts):
+            self.trace.append({"event": "incomplete_answer_withheld", "reason": self.terminal})
+            answer = recovery_question(self.question, self.runner.wants_hindi(self.question))
+            status = "needs_clarification"
+            sources = None
+            partial_reason = None
         value = {
             "answer": self.runner.clean_user_answer(answer, self.question),
             "charts": [],
@@ -578,6 +622,7 @@ class Coordinator:
             "max_tasks_per_action": min(8, MAX_SPECIALIST_CALLS - self.calls),
             "working_context": self.working,
             "answer_requirements": self.requirements.model_dump(),
+            "voter_result_contract": share_threshold_request(self.question) or ({"distinct_list_field": distinct_list_request(self.question)} if distinct_list_request(self.question) else None),
             "pending_clarification": bool(self.pending),
             "resolved_scope": "whole_constituency"
             if whole_constituency(self.objective + " " + self.question)
@@ -743,7 +788,32 @@ class Coordinator:
                 raise ValueError(
                     "A data answer needs evidence_task_ids with successful facts. Delegate the appropriate specialist now; do not repeat finish or ask the user to fix an internal assignment."
                 )
-            validate_zero_claim(action.answer, supported)
+            share_contract = share_threshold_request(self.question)
+            distinct_field = distinct_list_request(self.question)
+            if share_contract:
+                rows = qualifying_shares(supported, share_contract)
+                if rows is None:
+                    raise ValueError(
+                        "The cited observations do not establish the requested percentage-filtered list. "
+                        "Ask Voter for a complete grouped result with the geography, matching religion count, and all-voter count in each row; filter only after both counts are available."
+                    )
+                with closing(self.runner.gcs_data.open_sqlite(self.slug, "voters.db")) as conn:
+                    if not shares_match_source(conn, share_contract, rows):
+                        raise ValueError(
+                            "The grouped counts or qualifying geography coverage do not match the voter roll. "
+                            "Ask Voter to recompute matching and all-voter counts for every group from the full source."
+                        )
+                action.answer = render_shares(rows, share_contract)
+            elif distinct_field:
+                values, complete = distinct_values(supported, distinct_field)
+                if not complete and action.status == "complete":
+                    raise ValueError(
+                        "The unique-value list is incomplete. Ask Voter to fetch contiguous ordered pages until a page has fewer than 80 rows; cite all pages."
+                    )
+                if values or complete:
+                    action.answer = render_distinct(values, distinct_field, complete)
+            if not share_contract:
+                validate_zero_claim(action.answer, supported)
             if (
                 self.requirements.intent == "public_history"
                 and action.status == "complete"
@@ -1119,72 +1189,6 @@ class Coordinator:
             return self.response(
                 "\n".join(dict.fromkeys(missing)), "needs_clarification", True
             )
-        usable = [
-            r for r in self.results.values() if r["status"] in {"complete", "partial"}
-        ]
-        sql_results = [r for r in usable if r["agent"] in {"voter", "history"}]
-        if self.requirements.intent == "election_ranking":
-            try:
-                rows = ranking_rows(self.requirements, sql_results, self.tasks)
-            except ValueError:
-                pass
-            else:
-                answer = render_ranking(rows, self.requirements, self.meta["name"], self.runner.wants_hindi(self.question))
-                return self.response(answer + "\nThis is a verified partial answer from the available results.", "partial")
-        if sql_results:
-            lines = ["The database returned these partial results:"]
-            for result in sql_results[-3:]:
-                for fact in result["facts"][-2:]:
-                    columns, rows = fact.get("columns", []), fact.get("rows", [])
-                    if columns and rows:
-                        lines.append(dump({"columns": columns, "rows": rows[:10]}))
-                    if fact.get("truncated"):
-                        lines.append("Additional rows were omitted.")
-                lines.extend(result.get("gaps", [])[:2])
-                lines.extend(result.get("errors", [])[-1:])
-            lines.append("A complete answer could not be established from this attempt.")
-            return self.response("\n".join(lines), "partial")
-        sources = {
-            s["source_id"]: s
-            for r in usable
-            if r["agent"] == "research"
-            for s in r["sources"]
-            if s.get("source_id")
-            and canonical(s.get("url"))
-            and (s.get("read_status") == "page_read")
-        }
-        findings = [
-            f
-            for r in usable
-            if r["agent"] == "research"
-            for f in r["facts"]
-            if f.get("text")
-            and f.get("source_ids")
-            and all((sid in sources for sid in f["source_ids"]))
-        ]
-        if findings:
-            selected = findings[:3]
-            answer = (
-                "आंशिक उत्तर:\n"
-                if self.runner.wants_hindi(self.question)
-                else "Partial answer:\n"
-            ) + "\n".join(
-                (
-                    f["text"] + " " + " ".join((f"[{sid}]" for sid in f["source_ids"]))
-                    for f in selected
-                )
-            )
-            answer += "\n" + (
-                "पूरा ऐतिहासिक विवरण स्थापित नहीं हो पाया।"
-                if self.runner.wants_hindi(self.question)
-                else "I could not complete all the details requested in this attempt."
-            )
-            cited = list(
-                dict.fromkeys((sid for f in selected for sid in f["source_ids"]))
-            )
-            return self.response(
-                answer, "partial", sources=[sources[sid] for sid in cited]
-            )
         if self.terminal in {
             "provider_capacity",
             "provider_unavailable",
@@ -1193,6 +1197,12 @@ class Coordinator:
             return self.response(
                 user_error(self.terminal, self.runner.wants_hindi(self.question)),
                 "failed",
+            )
+        if any(r["status"] in {"complete", "partial"} and r.get("facts") for r in self.results.values()):
+            self.trace.append({"event": "incomplete_answer_withheld", "reason": self.terminal})
+            return self.response(
+                recovery_question(self.question, self.runner.wants_hindi(self.question)),
+                "needs_clarification",
             )
         codes = {r.get("failure_code") for r in self.results.values()}
         if self.terminal == "deadline_exceeded" or "deadline_exceeded" in codes:

@@ -52,6 +52,20 @@ GUIDANCE
   the returned row_count. Resolve complete counts separately from displayed lists.
 - If observations are truncated, obtain an untruncated aggregate before claiming
   no matches. If that cannot be done, report a gap, not a zero.
+- A truncated DISTINCT list is only one page. Use the supplied next_page_offset
+  with the same SELECT DISTINCT and stable ORDER BY, adding LIMIT -1 OFFSET n.
+  Continue until a page has fewer than 80 rows. Keep every page as final
+  evidence; repeating the same SQL never advances the list.
+- For a requested percentage threshold by region or booth, compute the matching
+  religion count and the all-voter count for each group. Apply the strict
+  threshold to those counts and return a complete grouped result with both
+  counts in every row. A pair of truncated count lists cannot establish the
+  filtered answer. You may plan with exploratory queries, then execute a final
+  grouped SELECT that covers all groups before finishing. For example, group
+  by region and return SUM(CASE WHEN religion='Muslim' THEN 1 ELSE 0 END) AS
+  muslim_count alongside COUNT(*) AS total_count; use HAVING to restrict the
+  ratio. Do not put religion='Muslim' in the main WHERE clause, which would
+  shrink the denominator.
 - On finish, set evidence_source_ids to the final answer observations. Exclude
   exploratory label samples and preliminary record dumps; they are not totals.
 - Never invent region labels the user did not imply.

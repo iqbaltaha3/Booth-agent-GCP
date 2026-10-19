@@ -161,7 +161,7 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertEqual(self.calls, [])
 
-    def test_coordinator_preserves_citations_and_public_input_isolated(self):
+    def test_coordinator_withholds_partial_research_and_public_input_isolated(self):
         source = {"source_id": "R123456789abc", "url": "https://example.com/notice", "title": "Fictional notice",
                   "published_at": self.today, "searched_at": self.today, "source_type": "official", "read_status": "page_read"}
         observation = SpecialistResult(task_id="web1", agent="research", status="partial",
@@ -170,7 +170,9 @@ class ResearchTests(unittest.TestCase):
                  '{"action":"finish","answer":"Maintenance is planned [R123456789abc].","evidence_task_ids":["web1"]}']
         with patch.object(runner, "gemini_chat", side_effect=plans), patch("agents.runtime.research_specialist", return_value=observation) as specialist:
             result = runner.run_local_agent("Any current water notices?", "allahabad-north", voter_context={"private": "not-for-research"})
-        self.assertEqual(result["sources"], [source])
+        self.assertEqual(result["status"], "needs_clarification")
+        self.assertEqual(result["sources"], [])
+        self.assertNotIn("Maintenance is planned", result["answer"])
         self.assertEqual(result["agent_path"], ["research_agent"])
         self.assertEqual(len(specialist.call_args.args), 4)  # No history, voter context or private observations.
 
@@ -186,7 +188,9 @@ class ResearchTests(unittest.TestCase):
         with patch.object(runner, "gemini_chat", side_effect=replies) as model, patch("agents.runtime.research_specialist", return_value=observation):
             result = runner.run_local_agent("Recent reports?", "allahabad-north")
         self.assertEqual(model.call_count, 4)
-        self.assertEqual(len(result["sources"]), 1)
+        self.assertEqual(result["status"], "needs_clarification")
+        self.assertEqual(result["sources"], [])
+        self.assertNotIn("A report exists", result["answer"])
 
 
 if __name__ == "__main__":

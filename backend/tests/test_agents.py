@@ -319,7 +319,8 @@ class AgentTests(unittest.TestCase):
         with patch.object(runner, "gemini_chat", side_effect=next_plan), patch("agents.runtime.run_specialist", side_effect=observe) as specialist:
             result = runner.run_local_agent("Count voters", "seat")
         self.assertEqual(specialist.call_count, 8)
-        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["status"], "needs_clarification")
+        self.assertNotIn("total", result["answer"].casefold())
 
 
 if __name__ == "__main__":

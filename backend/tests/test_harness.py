@@ -198,9 +198,9 @@ class HarnessTests(unittest.TestCase):
         finish = action("finish", answer="Booth 1, Booth 2", evidence_task_ids=["t1"])
         with patch.object(runner, "gemini_chat", side_effect=[action("delegate", tasks=[assignment.model_dump()]), finish, finish]), patch("agents.runtime.run_specialist", return_value=result):
             response = runner.run_local_agent("Top regions where BJP was ahead in 2024", "allahabad-south")
-        self.assertEqual(response["status"], "partial")
+        self.assertEqual(response["status"], "needs_clarification")
         self.assertNotIn("Booth 1", response["answer"])
-        self.assertIn("did not establish", response["answer"])
+        self.assertIn("narrow", response["answer"])
 
     def test_invalid_rankings_are_rejected(self):
         for rows in ([["A", 100, "B", 90, 50]], [["A", 200, "B", 150, 50], ["C", 400, "D", 100, 300]],
@@ -294,13 +294,13 @@ class HarnessTests(unittest.TestCase):
             with self.assertRaises(sqlite3.OperationalError):
                 connection.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT SUM(x) FROM n").fetchone()
 
-    def test_failed_synthesis_recovers_verified_ranking(self):
+    def test_failed_synthesis_withholds_incomplete_ranking(self):
         _, assignment, result = self.ranking()
         with patch.object(runner, "gemini_chat", side_effect=[action("delegate", tasks=[assignment.model_dump()]), "<<LLM_ERROR: deadline_exceeded>>"]), patch("agents.runtime.run_specialist", return_value=result):
             response = runner.run_local_agent("Top regions where BJP was ahead in 2024", "allahabad-south")
-        self.assertEqual(response["status"], "partial")
-        self.assertIn("margin 300", response["answer"])
-        self.assertIn("verified partial", response["answer"])
+        self.assertEqual(response["status"], "needs_clarification")
+        self.assertNotIn("margin 300", response["answer"])
+        self.assertIn("narrow", response["answer"])
 
     def test_no_verified_findings_can_finish_honestly_without_retry_loop(self):
         assignment = task("research", research_query={"public_question": "Historical background of Allahabad South"})
@@ -309,9 +309,10 @@ class HarnessTests(unittest.TestCase):
         with patch.object(runner, "gemini_chat", side_effect=[action("delegate", tasks=[assignment.model_dump()]),
                 action("finish", answer="The retrieved sources did not establish a reliable historical account.", status="partial")]) as model, patch("agents.runtime.run_specialist", return_value=result):
             response = runner.run_local_agent("History of this constituency", "allahabad-south")
-        self.assertEqual(response["status"], "partial")
+        self.assertEqual(response["status"], "needs_clarification")
         self.assertEqual(model.call_count, 2)
-        self.assertIn("did not establish", response["answer"])
+        self.assertNotIn("retrieved sources", response["answer"])
+        self.assertIn("narrow", response["answer"])
 
     def test_invalid_contract_gets_one_targeted_repair(self):
         invalid = action("clarify", answer="Which election year?", answer_requirements={"limit": 0})
@@ -330,15 +331,17 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(response["status"], "complete")
         self.assertIn("inspect available election", model.call_args_list[1].args[0][1]["content"])
 
-    def test_server_downgrade_explains_the_observed_gap(self):
+    def test_server_downgrade_withholds_partial_result(self):
         assignment = task()
         observation = SpecialistResult(task_id="t1", agent="history", status="partial",
             facts=[{"total": 3}], gaps=["The 2022 results could not be verified; only 2024 is covered."])
         with patch.object(runner, "gemini_chat", side_effect=[action("delegate", tasks=[assignment.model_dump()]),
                 action("finish", answer="Three results are available.", evidence_task_ids=["t1"])]), patch("agents.runtime.run_specialist", return_value=observation):
             response = runner.run_local_agent("Compare 2022 and 2024 results", "allahabad-south")
-        self.assertEqual(response["status"], "partial")
-        self.assertEqual(response["partial_reason"], observation.gaps[0])
+        self.assertEqual(response["status"], "needs_clarification")
+        self.assertNotIn("Three results", response["answer"])
+        self.assertIsNone(response["partial_reason"])
+        self.assertIn("narrow", response["answer"])
 
     def test_partial_explanation_handles_timeouts_and_hides_diagnostics(self):
         self.assertIn("time limit", partial_reason("", {}, "deadline_exceeded"))
@@ -418,8 +421,32 @@ class HarnessTests(unittest.TestCase):
                    action("finish", status="partial", answer="I could not determine the matching booth count.", evidence_task_ids=["t1"])]
         with patch.object(runner, "gemini_chat", side_effect=replies), patch("agents.runtime.run_specialist", return_value=result):
             response = runner.run_local_agent("Count matching booths across the constituency", "allahabad-south")
-        self.assertIn("could not determine", response["answer"])
+        self.assertEqual(response["status"], "needs_clarification")
         self.assertNotIn("No booths", response["answer"])
+
+    def test_fallback_never_shows_intermediate_sql_rows(self):
+        assignment = task("voter")
+        result = SpecialistResult(task_id="t1", agent="voter", status="partial",
+            facts=[{"columns": ["region"], "rows": [["Private intermediate row"]], "truncated": True}])
+        with patch.object(runner, "gemini_chat", side_effect=[
+            action("delegate", tasks=[assignment.model_dump()]), "<<LLM_ERROR: deadline_exceeded>>"
+        ]), patch("agents.runtime.run_specialist", return_value=result):
+            response = runner.run_local_agent("list all unique regions", "allahabad-south")
+        self.assertEqual(response["status"], "needs_clarification")
+        self.assertNotIn("Private intermediate row", response["answer"])
+        self.assertNotIn("columns", response["answer"])
+
+    def test_failed_final_answer_with_evidence_does_not_show_rows(self):
+        assignment = task("voter")
+        result = SpecialistResult(task_id="t1", agent="voter", status="complete",
+            facts=[{"columns": ["region"], "rows": [["Private intermediate row"]]}])
+        with patch.object(runner, "gemini_chat", side_effect=[
+            action("delegate", tasks=[assignment.model_dump()]),
+            action("finish", status="failed", answer="Private intermediate row was found.", evidence_task_ids=["t1"]),
+        ]), patch("agents.runtime.run_specialist", return_value=result):
+            response = runner.run_local_agent("Find regions", "allahabad-south")
+        self.assertEqual(response["status"], "needs_clarification")
+        self.assertNotIn("Private intermediate row", response["answer"])
 
     def test_final_aggregate_excludes_truncated_exploration(self):
         with tempfile.TemporaryDirectory() as root:
