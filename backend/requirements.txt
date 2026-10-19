@@ -5,12 +5,16 @@ pydantic>=2.5.0
 pydantic-settings>=2.0.0
 # HTTP calls to the speech provider
 requests>=2.31.0
-# Google storage, login, and deployed AI runtime
+# Google storage and login
 google-cloud-storage>=2.18.0
 firebase-admin>=6.5.0
 google-cloud-firestore>=2.21.0
-google-cloud-aiplatform>=1.60.0
 # Constituency configuration read by the bundled agent runner
 PyYAML>=6.0
 python-multipart>=0.0.9
 sqlglot==27.29.0
+
+# Agent model integration and graph orchestration
+langchain>=1.0,<2
+langgraph>=1.0,<2
+langchain-google-genai>=4.0,<5

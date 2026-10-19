@@ -4,14 +4,18 @@ All live answer queries are written by the SQL specialist. Helpers here resolve
 source labels, verified references and validation scope; they do not choose an
 answer-query execution path.
 """
-import copy
+
 import json
 import re
 import unicodedata
 from contextlib import closing
 
 from pydantic import Field
-from agents.contracts import Contract, VoterFilter, NameQuery, HouseholdQuery, SpecialistResult
+from agents.contracts import (
+    Contract,
+    VoterFilter,
+    HouseholdQuery,
+)
 from agents.households import data_version, normalized_station
 from agents.name_matching import resolve_booth, AmbiguousInput
 from agents.station_matching import resolve_roll_station
@@ -248,42 +252,6 @@ def population_filters(request, slug, data):
     return filters
 
 
-def count_request(task, slug, runner):
-    result = SpecialistResult(task_id=task.task_id, agent='voter', status='failed')
-    try:
-        request = task.voter_request
-        filters = population_filters(request, slug, runner.gcs_data)
-        with closing(runner.gcs_data.open_sqlite(slug, 'voters.db')) as conn:
-            where, params, resolved = compile_filters(conn, filters, runner)
-            sql = 'SELECT COUNT(*) AS total FROM voters WHERE ' + where
-            total = conn.execute(sql, params).fetchone()[0]
-            records = None
-            if request.operation == 'lookup':
-                available = set(runner.gcs_data.list_columns(conn, 'voters'))
-                fields = [c for c in ('name', 'relative_name', 'relation_type', 'house_no', 'age', 'gender', 'epic_id', 'polling_station', 'region') if c in available]
-                select = ','.join('"' + c + '"' for c in fields)
-                rows = conn.execute(f'SELECT {select} FROM voters WHERE {where} ORDER BY {select} LIMIT 20', params).fetchall()
-                records = [dict(row) for row in rows]
-        sid = f'{task.task_id}:count'
-        result.status = 'complete'
-        result.facts = [{'source_id': sid, 'operation': request.operation, 'total': total,
-                         'filters': resolved, 'validated_count': request.operation == 'count'}]
-        if records is not None:
-            result.facts[0].update(records=records, truncated=total > 20)
-        result.sources = [{'source_id': sid, 'database': 'voters.db', 'sql': sql, 'parameters': params}]
-        if records is not None:
-            result.sources.append({'source_id': f'{task.task_id}:lookup', 'database': 'voters.db',
-                'sql': f'SELECT {select} FROM voters WHERE {where} ORDER BY {select} LIMIT 20', 'parameters': params})
-    except AmbiguousInput as error:
-        result.status = 'needs_clarification'
-        result.missing_inputs = [str(error)]
-    except Exception as error:
-        result.errors = [str(error)]
-        if isinstance(error, FileNotFoundError):
-            result.failure_code = 'data_unavailable'
-    return result
-
-
 def remember_population(task, result, slug, data, context):
     request = task.voter_request
     if not request or request.operation not in {'count', 'lookup'} or result.status != 'complete' or not result.facts:
@@ -301,26 +269,72 @@ def remember_population(task, result, slug, data, context):
 def rehydrate_selected_voter(slug, data, context):
     """Rehydrate a server-verified entity as current, citable Voter evidence.
 
-This prepares conversation context; it does not infer or choose a new person.
-No record is reused unless identity, constituency and source version still match.
-"""
-    reference = context.get('selected_reference')
-    saved = context.get('references', {}).get(reference)
-    if not saved or saved.get('constituency_id') != slug or saved.get('data_version') != data_version(slug, data):
+    This prepares conversation context; it does not infer or choose a new person.
+    No record is reused unless identity, constituency and source version still match.
+    """
+    reference = context.get("selected_reference")
+    saved = context.get("references", {}).get(reference)
+    if (
+        not saved
+        or saved.get("constituency_id") != slug
+        or saved.get("data_version") != data_version(slug, data)
+    ):
         return None
-    with closing(data.open_sqlite(slug, 'voters.db')) as conn:
-        available = set(data.list_columns(conn, 'voters'))
-        fields = [c for c in ('name', 'relative_name', 'house_no', 'age', 'gender', 'epic_id', 'polling_station') if c in available]
-        sql = 'SELECT ' + ','.join('"' + c + '"' for c in fields) + ' FROM voters WHERE epic_id = ?'
-        rows = conn.execute(sql, (saved['epic_id'],)).fetchmany(2)
+    with closing(data.open_sqlite(slug, "voters.db")) as conn:
+        available = set(data.list_columns(conn, "voters"))
+        fields = [
+            c
+            for c in (
+                "name",
+                "relative_name",
+                "house_no",
+                "age",
+                "gender",
+                "epic_id",
+                "polling_station",
+            )
+            if c in available
+        ]
+        sql = (
+            "SELECT "
+            + ",".join('"' + c + '"' for c in fields)
+            + " FROM voters WHERE epic_id = ?"
+        )
+        rows = conn.execute(sql, (saved["epic_id"],)).fetchmany(2)
     if len(rows) != 1:
         return None
-    return {'task_id': '_verified_person', 'agent': 'voter', 'status': 'complete',
-        'facts': [{'source_id': '_verified_person:q1', 'operation': 'lookup', 'records': [dict(rows[0])],
-                   'total': 1, 'verified_reference': reference,
-                   'voter_references': [{'reference': reference, 'name': dict(rows[0]).get('name'), 'polling_station': dict(rows[0]).get('polling_station')}]}],
-        'sources': [{'source_id': '_verified_person:q1', 'database': 'voters.db', 'data_version': saved['data_version'], 'sql': sql, 'parameters': [saved['epic_id']]}],
-        'limitations': [], 'gaps': []}
+    return {
+        "task_id": "_verified_person",
+        "agent": "voter",
+        "status": "complete",
+        "facts": [
+            {
+                "source_id": "_verified_person:q1",
+                "operation": "lookup",
+                "records": [dict(rows[0])],
+                "total": 1,
+                "verified_reference": reference,
+                "voter_references": [
+                    {
+                        "reference": reference,
+                        "name": dict(rows[0]).get("name"),
+                        "polling_station": dict(rows[0]).get("polling_station"),
+                    }
+                ],
+            }
+        ],
+        "sources": [
+            {
+                "source_id": "_verified_person:q1",
+                "database": "voters.db",
+                "data_version": saved["data_version"],
+                "sql": sql,
+                "parameters": [saved["epic_id"]],
+            }
+        ],
+        "limitations": [],
+        "gaps": [],
+    }
 
 
 def validate_count_answer(answer, supported):

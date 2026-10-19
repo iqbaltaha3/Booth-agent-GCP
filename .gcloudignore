@@ -16,3 +16,5 @@ backend/.env
 .DS_Store
 
 upload-constituency-folders
+.venv/
+.ruff_cache/

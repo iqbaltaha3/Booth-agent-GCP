@@ -6,8 +6,6 @@ from contextlib import closing
 from functools import lru_cache
 from uuid import uuid4
 
-from agents.contracts import SpecialistResult
-
 
 def normalized_station(value):
     return " ".join(unicodedata.normalize("NFC", str(value or "")).casefold().split())
@@ -67,95 +65,3 @@ def remember_voters(result, slug, data, context):
     while len(references) > 40:
         key = next(k for k in references if k != context.get("selected_reference"))
         del references[key]
-
-
-def household_lookup(task, slug, data, context):
-    result = SpecialistResult(task_id=task.task_id, agent="voter", status="failed")
-    query = task.household_query
-    try:
-        if task.constraints:
-            raise ValueError("Put household filters in household_query; do not retain name or demographic filters")
-        version = data_version(slug, data)
-        epic, anchor = query.epic_id, None
-        if query.reference:
-            saved = context.get("references", {}).get(query.reference)
-            if not saved or saved["constituency_id"] != slug:
-                result.status = "needs_clarification"
-                result.missing_inputs = ["Please identify the voter whose household you mean."]
-                return result
-            if saved["data_version"] != version:
-                result.status = "needs_clarification"
-                result.missing_inputs = ["The voter roll has changed. Please look up the voter again before using the previous household reference."]
-                return result
-            epic = saved["epic_id"]
-        with closing(data.open_sqlite(slug, "voters.db")) as conn:
-            if epic:
-                rows = conn.execute("SELECT * FROM voters WHERE epic_id = ?", (epic,)).fetchmany(2)
-                if len(rows) != 1:
-                    result.status = "needs_clarification"
-                    result.missing_inputs = ["The voter identifier does not resolve uniquely in this constituency. Please confirm the voter."]
-                    return result
-                anchor = dict(rows[0])
-                house, station = anchor["house_no"], anchor["polling_station"]
-            else:
-                house = query.house_no.strip()
-                from agents.station_matching import resolve_roll_station, AmbiguousInput
-                try:
-                    station = resolve_roll_station(query.polling_station, conn)
-                except AmbiguousInput as error:
-                    result.status = "needs_clarification"
-                    result.missing_inputs = [str(error)]
-                    return result
-            if not str(house or "").strip() or not str(station or "").strip():
-                raise ValueError("The voter does not have a usable house and polling station")
-            # Preserve house punctuation. Never broaden to the entire constituency.
-            where = "TRIM(CAST(house_no AS TEXT)) = ? AND polling_station = ?"
-            params = [str(house).strip(), station]
-            total = conn.execute(f"SELECT COUNT(*) FROM voters WHERE {where}", params).fetchone()[0]
-            if anchor:
-                included = conn.execute(f"SELECT COUNT(*) FROM voters WHERE {where} AND epic_id = ?", [*params, epic]).fetchone()[0]
-                if included != 1:
-                    raise ValueError("Household lookup contradicted its verified anchor; no zero-match answer is permitted")
-            returned_total = total
-            if query.exclude_anchor:
-                where += " AND (epic_id IS NULL OR epic_id != ?)"
-                params.append(epic)
-                returned_total -= 1
-            columns = set(data.list_columns(conn, "voters"))
-            display = columns & {"name", "relative_name", "relation_type", "house_no", "age", "gender", "epic_id", "polling_station", "region"}
-            select = ", ".join('"' + key + '"' for key in sorted(display))
-            sql = f"SELECT {select} FROM voters WHERE {where} ORDER BY epic_id LIMIT 20"
-            records = [dict(row) for row in conn.execute(sql, params).fetchall()]
-            result.status = "complete"
-            result.facts = [{"operation": "household_lookup", "house_no": house, "polling_station": station,
-                             "total": returned_total, "household_total_including_anchor": total,
-                             "excluded_anchor": query.exclude_anchor, "records": records,
-                             "truncated": returned_total > 20}]
-            result.sources = [{"database": "voters.db", "data_version": version, "sql": sql, "parameters": params,
-                               "anchor_checked": bool(anchor)}]
-            result.limitations = ["These are matching voter-roll records, not proof of current residence or family relationships."]
-    except Exception as error:
-        result.errors = [str(error)]
-    return result
-
-
-def name_predicate(sql):
-    """Check SQLite name reads without mistaking SELECT/ORDER BY display columns for predicates."""
-    # Tokenize strings, quoted identifiers, punctuation and SQL words; strings/comments are never identifiers.
-    import re
-    raw = re.findall(r"--[^\n]*|/\*[\s\S]*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`[^`]*`|\[[^\]]*\]|[A-Za-z_][A-Za-z_0-9]*|[()]", sql)
-    clause, stack = "select", []
-    for token in raw:
-        if token.startswith(("'", "--", "/*")):
-            continue
-        word = token.strip('"`[]').casefold()
-        quoted = token.startswith(('"', '`', '['))
-        if not quoted and word in {"where", "having", "on", "select", "order", "group", "limit", "union"}:
-            clause = word
-        elif word == "(":
-            stack.append(clause)
-        elif word == ")" and stack:
-            clause = stack.pop()
-        elif word in {"name", "relative_name"} and clause in {"where", "having", "on"}:
-            return True
-    return False

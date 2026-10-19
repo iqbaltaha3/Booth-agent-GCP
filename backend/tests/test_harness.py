@@ -9,9 +9,24 @@ from contextlib import closing
 import unittest
 from unittest.mock import patch
 
-from agents import execution, local_runner as runner
-from agents.completion import infer_requirements, ranking_rows, resolve_requirements, render_ranking, validate_zero_claim, validate_clarification, source_policy
-from agents.contracts import AnswerRequirements, CoordinatorAction, SpecialistTask, SpecialistResult, WebResearchQuery
+from agents import execution, local_runner as runner, model as model_boundary
+from langchain_core.messages import AIMessage
+from agents.completion import (
+    infer_requirements,
+    ranking_rows,
+    resolve_requirements,
+    render_ranking,
+    validate_zero_claim,
+    validate_clarification,
+    source_policy,
+)
+from agents.contracts import (
+    AnswerRequirements,
+    CoordinatorAction,
+    SpecialistTask,
+    SpecialistResult,
+    WebResearchQuery,
+)
 from agents.runtime import compact_results
 from agents.runtime import sql_specialist
 from app.config import get_settings
@@ -61,33 +76,108 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             CoordinatorAction.model_validate({"action": "delegate", "tasks": [], "extra": 1})
 
-    def test_payload_includes_schema_separately(self):
-        payload = runner._to_gemini_payload([{"role": "system", "content": "Be concise"},
-            {"role": "user", "content": "Hello"}], 0, 1024, CoordinatorAction.model_json_schema())
-        self.assertIn("responseSchema", payload["generationConfig"])
-        self.assertEqual(payload["systemInstruction"]["parts"][0]["text"], "Be concise")
+    def test_langchain_binds_native_schema_and_preserves_system_message(self):
+        with patch.object(model_boundary, "ChatGoogleGenerativeAI") as factory:
+            factory.return_value.bind.return_value.invoke.return_value = AIMessage(
+                content="{}", response_metadata={"finish_reason": "STOP"}
+            )
+            value = model_boundary.chat(
+                [
+                    {"role": "system", "content": "Be concise"},
+                    {"role": "user", "content": "Hello"},
+                ],
+                response_schema=CoordinatorAction.model_json_schema(),
+            )
+        self.assertEqual(value, "{}")
+        self.assertEqual(
+            factory.return_value.bind.call_args.kwargs["response_schema"],
+            execution.provider_schema(CoordinatorAction.model_json_schema()),
+        )
+        self.assertEqual(
+            factory.return_value.bind.return_value.invoke.call_args.args[0][0].content,
+            "Be concise",
+        )
+        self.assertEqual(factory.call_args.kwargs["max_retries"], 0)
+
+    def test_real_langchain_adapter_builds_provider_request_without_network(self):
+        from google.genai import types
+
+        provider_response = types.GenerateContentResponse(
+            candidates=[
+                types.Candidate(
+                    content=types.Content(parts=[types.Part(text="{}")]),
+                    finish_reason="STOP",
+                )
+            ]
+        )
+        with (
+            patch.dict(
+                "os.environ",
+                {"GEMINI_API_KEY": "fictional", "GOOGLE_GENAI_USE_VERTEXAI": "false"},
+            ),
+            patch("langchain_google_genai.chat_models.Client") as client,
+        ):
+            client.return_value.models.generate_content.return_value = provider_response
+            value = model_boundary.chat(
+                [{"role": "user", "content": "Hello"}],
+                response_schema=CoordinatorAction.model_json_schema(),
+            )
+        self.assertEqual(value, "{}")
+        request = client.return_value.models.generate_content.call_args.kwargs
+        self.assertEqual(request["config"].response_mime_type, "application/json")
+        self.assertIn("properties", request["config"].response_json_schema)
+
+    def test_wrapped_provider_errors_keep_status_without_exposing_body(self):
+        cause = RuntimeError("private provider response")
+        cause.code = 429
+        wrapped = RuntimeError("wrapped private request")
+        wrapped.__cause__ = cause
+        with patch.object(
+            model_boundary, "ChatGoogleGenerativeAI", side_effect=wrapped
+        ):
+            value = model_boundary._invoke_model(
+                [], 0, 512, time.monotonic() + 10, None
+            )
+        self.assertEqual(value.status_code, 429)
+        self.assertNotIn("private", value)
 
     def test_truncated_and_blocked_generations_never_parse_as_complete(self):
-        with execution.execution_scope():
-            self.assertIn("output_truncated", runner._response_text({"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": "{}"}]}}]}))
-            self.assertIn("generation_blocked", runner._response_text({"candidates": [{"finishReason": "SAFETY"}]}))
+        with (
+            patch.object(model_boundary, "ChatGoogleGenerativeAI") as factory,
+            execution.execution_scope(),
+        ):
+            invoke = factory.return_value.bind.return_value.invoke
+            invoke.return_value = AIMessage(
+                content="{}", response_metadata={"finish_reason": "MAX_TOKENS"}
+            )
+            result = model_boundary._invoke_model(
+                [], 0, 512, time.monotonic() + 10, None
+            )
+            self.assertIn("output_truncated", result)
+            invoke.return_value = AIMessage(
+                content="{}", response_metadata={"finish_reason": "SAFETY"}
+            )
+            self.assertIn(
+                "generation_blocked",
+                model_boundary._invoke_model([], 0, 512, time.monotonic() + 10, None),
+            )
             self.assertEqual(execution.events()[0]["finish_reason"], "MAX_TOKENS")
 
-    def test_api_transport_retries_truncation_with_larger_budget(self):
-        class Response:
-            def __init__(self, reason, text):
-                self.value = {"candidates": [{"finishReason": reason, "content": {"parts": [{"text": text}]}}]}
-            def __enter__(self): return self
-            def __exit__(self, *args): pass
-            def read(self): return json.dumps(self.value).encode()
-        with patch.object(runner, "GEMINI_API_KEY", "synthetic"), patch.object(runner.urllib.request, "urlopen", side_effect=[Response("MAX_TOKENS", "{"), Response("STOP", "{}")]) as request:
-            self.assertEqual(runner.gemini_chat([], max_tokens=512), "{}")
-        first, second = [json.loads(call.args[0].data)["generationConfig"]["maxOutputTokens"] for call in request.call_args_list]
-        self.assertEqual((first, second), (512, 1024))
+    def test_langchain_transport_retries_truncation_with_larger_budget(self):
+        with patch.object(
+            model_boundary,
+            "_invoke_model",
+            side_effect=["<<LLM_ERROR: output_truncated>>", "{}"],
+        ) as invoke:
+            self.assertEqual(model_boundary.chat([], max_tokens=512), "{}")
+        self.assertEqual([call.args[2] for call in invoke.call_args_list], [512, 1024])
 
     def test_request_deadline_is_isolated_and_stops_new_calls(self):
-        with execution.execution_scope(-1), patch.object(runner, "vertex_deadline_chat") as provider:
-            self.assertIn("deadline", runner.gemini_chat([]))
+        with (
+            execution.execution_scope(-1),
+            patch.object(model_boundary, "_invoke_model") as provider,
+        ):
+            self.assertIn("deadline", model_boundary.chat([]))
             provider.assert_not_called()
         self.assertIsNone(execution.deadline())
 

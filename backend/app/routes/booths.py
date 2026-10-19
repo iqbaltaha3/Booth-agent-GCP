@@ -1,5 +1,5 @@
 """
-Booth-portfolio routes.  Called by the ADK PortfolioSubAgent.
+Booth-portfolio API routes for authenticated clients.
 """
 
 from __future__ import annotations

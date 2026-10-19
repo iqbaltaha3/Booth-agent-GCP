@@ -1,128 +1,50 @@
-# CI/CD
+# Build and deployment
 
-This project deploys from GitHub to GCP with Cloud Build.
+The repository supplies three Cloud Build configurations:
 
-Production URLs:
+| File | Scope |
+|---|---|
+| `cloudbuild.yaml` | Backend tests, backend build/deploy and frontend build/deploy |
+| `cloudbuild.deploy.yaml` | Backend tests and backend build/deploy |
+| `cloudbuild.frontend.yaml` | Frontend build/deploy |
 
-- Frontend: https://booth-frontend-168028165100.asia-south1.run.app
-- Backend: https://booth-backend-168028165100.asia-south1.run.app
+Which configuration runs on push depends on triggers configured in GCP. Trigger
+existence, branch filters, IAM and current deployment state are not established by
+these files. Do not configure both combined and separate triggers for the same
+push unless duplicate deployment is intended.
 
-## What Happens On Push
+The backend runs the LangGraph harness in-process. Gemini access uses LangChain's
+Google integration with API keys or runtime service-account credentials. There is
+no separate agent deployment step.
 
-When you push to `main`:
+## Backend prerequisites
 
-1. Backend trigger runs `cloudbuild.deploy.yaml`.
-2. Cloud Build builds the backend Docker image.
-3. Cloud Build pushes it to Artifact Registry.
-4. Cloud Build deploys `booth-backend` to Cloud Run.
-5. Frontend trigger runs `cloudbuild.frontend.yaml`.
-6. Cloud Build builds the frontend with the backend URL.
-7. Cloud Build pushes it to Artifact Registry.
-8. Cloud Build deploys `booth-frontend` to Cloud Run.
+- A private artifact bucket with per-constituency folders.
+- Firebase Auth and users with allowed `constituency_slugs` claims.
+- A Firestore database for shared sessions, backend `roles/datastore.user` access,
+  and a TTL policy on `expires_at` for private session/turn records.
+- Gemini provider access for the runtime service account or a secret API key.
+- Tavily/Sarvam secret bindings if public research/voice are enabled.
+- Cloud Build permissions to push images and deploy Cloud Run using its runtime
+  service account.
 
-## GitHub Repo
+Deploy files explicitly set `LOCAL_DEV_AUTH=false`. Cloud Run's public ingress
+allows the browser to reach FastAPI; application authentication still requires
+Firebase tokens. Keep CORS aligned with the frontend origin.
 
-Suggested repo:
+Cloud files are cached for the process lifetime. Restart/redeploy the backend
+after artifact replacement. Data import/upload scripts are maintained separately
+from image deployment; inspect their `--help` and preview before executing.
 
-```text
-Name: my-booth-agent-GCP
-Description: Booth-level electoral intelligence app for Indian constituencies, hosted on GCP Cloud Run with per-constituency data isolation.
-Visibility: private
+## Local verification
+
+```sh
+pip install -r backend/requirements-dev.txt
+PYTHONPATH=backend:. python -m unittest discover -s backend/tests -v
+pip check
 ```
 
-## First Push
-
-After creating the GitHub repo, add it as the remote:
-
-```bash
-git remote add origin https://github.com/<your-github-user>/my-booth-agent-GCP.git
-git branch -M main
-git push -u origin main
-```
-
-## Give Cloud Build Permission To Deploy
-
-Run once:
-
-```bash
-PROJECT_ID=my-booth-agent
-PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
-
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
-  --role="roles/run.admin"
-
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
-  --role="roles/iam.serviceAccountUser"
-
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
-  --role="roles/artifactregistry.writer"
-```
-
-## Create Cloud Build Triggers
-
-Replace `<your-github-user>` with your GitHub username or organization.
-
-Backend trigger:
-
-```bash
-gcloud builds triggers create github \
-  --name=deploy-booth-backend \
-  --repo-owner=<your-github-user> \
-  --repo-name=my-booth-agent-GCP \
-  --branch-pattern='^main$' \
-  --build-config=cloudbuild.deploy.yaml \
-  --region=asia-south1 \
-  --included-files='backend/**,agents/**,constituencies/**,cloudbuild.deploy.yaml'
-```
-
-Frontend trigger:
-
-```bash
-gcloud builds triggers create github \
-  --name=deploy-booth-frontend \
-  --repo-owner=<your-github-user> \
-  --repo-name=my-booth-agent-GCP \
-  --branch-pattern='^main$' \
-  --build-config=cloudbuild.frontend.yaml \
-  --region=asia-south1 \
-  --included-files='frontend/**,cloudbuild.frontend.yaml'
-```
-
-## Deploy After That
-
-Make changes, commit, and push:
-
-```bash
-git add .
-git commit -m "Update app"
-git push
-```
-
-Cloud Build will deploy automatically.
-
-## Add Or Update Constituency Data
-
-Data is private and is not committed to GitHub.
-
-1. Run the local helper:
-
-```bash
-python3 scripts/add_constituency.py /path/to/gyanpur
-```
-
-2. Upload data to GCS:
-
-```bash
-gcloud storage rsync --recursive legacy-data/gyanpur gs://booth-agent-data-dev/gyanpur
-```
-
-3. Commit only config:
-
-```bash
-git add constituencies/gyanpur constituencies/manifest.json
-git commit -m "Update gyanpur constituency config"
-git push
-```
+Use the maintained routing and fictional conversation scripts for opt-in billed
+model evaluations. Offline tests do not establish live provider availability.
+The framework migration changes local source only; it does not deploy a service,
+change IAM or rewrite private datasets.

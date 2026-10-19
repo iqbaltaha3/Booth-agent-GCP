@@ -5,7 +5,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install dependencies before copying code so builds can reuse this layer.
-COPY backend/requirements.txt .
+COPY backend/requirements.lock ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Keep the existing runner and constituency configuration available to the API.

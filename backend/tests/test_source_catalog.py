@@ -1,4 +1,5 @@
 """Regression cases for source-specific grounding, scope and provider failures."""
+
 import json
 import sqlite3
 import tempfile
@@ -12,6 +13,7 @@ from agents.contracts import CoordinatorAction, VoterRequest
 from agents.source_catalog import voter_catalog, validate_demographic_intent
 from agents.voter import resolve_category
 from agents.provider_errors import ProviderReply, retry_after_seconds
+from agents import model as model_boundary
 from agents.count_answers import render_count
 from agents.runtime import run_specialist
 from app.config import get_settings
@@ -155,10 +157,21 @@ class SourceCatalogTests(unittest.TestCase):
 
 class ProviderResilienceTests(unittest.TestCase):
     def test_429_retries_with_backoff_then_succeeds(self):
-        with patch.object(runner, 'GEMINI_API_KEY', ''), patch.object(runner, 'MAX_ATTEMPTS', 3), \
-             patch.object(runner, 'vertex_deadline_chat', side_effect=[ProviderReply('<<LLM_ERROR: Vertex HTTP 429>>',429,3), '<<LLM_ERROR: Vertex HTTP 429>>', '{}']) as model, \
-             patch.object(runner.time, 'sleep') as sleep, patch.object(runner.random, 'uniform', return_value=0):
-            self.assertEqual(runner.gemini_chat([]), '{}')
+        with (
+            patch.object(model_boundary, "MAX_ATTEMPTS", 3),
+            patch.object(
+                model_boundary,
+                "_invoke_model",
+                side_effect=[
+                    ProviderReply("<<LLM_ERROR: HTTP 429>>", 429, 3),
+                    ProviderReply("<<LLM_ERROR: HTTP 429>>", 429),
+                    "{}",
+                ],
+            ) as model,
+            patch.object(model_boundary.time, "sleep") as sleep,
+            patch.object(model_boundary.random, "uniform", return_value=0),
+        ):
+            self.assertEqual(runner.gemini_chat([]), "{}")
             self.assertEqual(model.call_count, 3)
             self.assertEqual([call.args[0] for call in sleep.call_args_list], [3, 2])
 
@@ -173,7 +186,11 @@ class ProviderResilienceTests(unittest.TestCase):
         self.assertIn('temporarily busy', result['answer'])
 
     def test_nonretryable_error_is_not_retried(self):
-        with patch.object(runner, 'GEMINI_API_KEY', ''), patch.object(runner, 'vertex_deadline_chat', return_value='<<LLM_ERROR: Vertex HTTP 400>>') as model:
+        with patch.object(
+            model_boundary,
+            "_invoke_model",
+            return_value="<<LLM_ERROR: Vertex HTTP 400>>",
+        ) as model:
             runner.gemini_chat([])
         self.assertEqual(model.call_count, 1)
-        self.assertEqual(retry_after_seconds('12'), 12)
+        self.assertEqual(retry_after_seconds("12"), 12)

@@ -33,10 +33,8 @@ class Settings(BaseSettings):
     # Path to service-account JSON, or leave empty to use Application Default Credentials
     firebase_credentials_path: str | None = None
 
-    # Vertex AI Agent Engine
-    agent_engine_resource_name: str | None = None
-    # For local/dev: call agents in-process instead of Agent Engine
-    agent_local_mode: bool = True
+    # Explicit development-only auth bypass; independent of the agent runtime.
+    local_dev_auth: bool = False
 
     # auto uses Firestore on Cloud Run and process memory for local development.
     session_store: Literal["auto", "memory", "firestore"] = "auto"

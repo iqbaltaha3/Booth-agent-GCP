@@ -1,4 +1,4 @@
-"""Bounded coordinator ReAct loop and evidence-producing specialists."""
+"""LangGraph orchestration and evidence-producing domain specialists."""
 
 import json
 import copy
@@ -7,24 +7,68 @@ import re
 import time
 from uuid import uuid4
 from contextlib import closing
+from functools import lru_cache
+from typing import TypedDict
+
+from langsmith import tracing_context
 
 from pydantic import ValidationError
 
-from agents.contracts import CoordinatorAction, ResearchAction, SpecialistResult, AnswerRequirements, VoterRequest, VoterFilter
+from agents.contracts import (
+    CoordinatorAction,
+    ResearchAction,
+    SpecialistResult,
+    AnswerRequirements,
+    VoterRequest,
+    VoterFilter,
+)
 from agents import execution
-from agents.source_catalog import voter_catalog, validate_demographic_intent, CATALOG_VERSION
+from agents.source_catalog import (
+    voter_catalog,
+    validate_demographic_intent,
+    CATALOG_VERSION,
+)
 from agents.provider_errors import ModelFailure, failure_kind, user_error
 from agents.count_answers import render_count
 from agents.contracts import CountEvidence
-from agents.elections import electoral_request, election_catalog, validate_electoral_finish, catalog_evidence, coverage_request, resolve_electoral_objective, scope_lok_answer
+from agents.elections import (
+    electoral_request,
+    election_catalog,
+    validate_electoral_finish,
+    catalog_evidence,
+    coverage_request,
+    resolve_electoral_objective,
+    scope_lok_answer,
+)
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from agents.presentation import partial_reason as explain_partial
-from agents.completion import infer_requirements, resolve_requirements, prepare_task, validate_clarification, validate_zero_claim, whole_constituency, source_policy, ranking_rows, render_ranking
+from agents.completion import (
+    infer_requirements,
+    resolve_requirements,
+    prepare_task,
+    validate_clarification,
+    validate_zero_claim,
+    whole_constituency,
+    source_policy,
+    ranking_rows,
+    render_ranking,
+)
 from agents.name_matching import resolve_booth, AmbiguousInput
 from agents.households import remember_voters, data_version
-from agents.research import research_specialist, supported as research_supported, canonical, validate_public_assignment
-from agents.voter import prepare_voter_request, sql_population, remember_population, validate_count_answer, rehydrate_selected_voter
+from agents.research import (
+    research_specialist,
+    supported as research_supported,
+    canonical,
+    validate_public_assignment,
+)
+from agents.voter import (
+    prepare_voter_request,
+    sql_population,
+    remember_population,
+    validate_count_answer,
+    rehydrate_selected_voter,
+)
 
 MAX_COORDINATOR_TURNS = 8
 MAX_SPECIALIST_CALLS = 8
@@ -230,20 +274,42 @@ def portfolio_specialist(task, slug, runner):
 
 
 def run_specialist(task, slug, meta, runner, voter_context=None, question=""):
-    if task.agent == 'voter':
+    if task.agent == "voter":
         # Migrate older pending sessions into the same SQL-writing boundary.
         task = task.model_copy(deep=True)
         if not task.voter_request and task.name_query:
+            if task.constraints:
+                raise ValueError("Legacy name requests cannot carry extra constraints")
             q = task.name_query
-            task.voter_request = VoterRequest(operation=q.operation, person=q.person, relative=q.relative,
-                booth=q.booth, match_mode=q.match_mode, filters=q.predicates + [VoterFilter(field=k, value=str(v)) for k,v in q.filters.items()],
-                confirmed_person_variants=q.confirmed_person_variants, confirmed_relative_variants=q.confirmed_relative_variants)
+            task.voter_request = VoterRequest(
+                operation=q.operation,
+                person=q.person,
+                relative=q.relative,
+                booth=q.booth,
+                match_mode=q.match_mode,
+                filters=q.predicates
+                + [VoterFilter(field=k, value=str(v)) for k, v in q.filters.items()],
+                confirmed_person_variants=q.confirmed_person_variants,
+                confirmed_relative_variants=q.confirmed_relative_variants,
+            )
         elif not task.voter_request and task.household_query:
-            task.voter_request = VoterRequest(operation='household', **task.household_query.model_dump())
+            task.voter_request = VoterRequest(
+                operation="household", **task.household_query.model_dump()
+            )
         task.name_query = task.household_query = None
         context = voter_context if voter_context is not None else {}
-        task = prepare_voter_request(task, slug, runner.gcs_data, context)
-        validate_demographic_intent(task.voter_request, question, voter_catalog(slug, runner.gcs_data))
+        try:
+            task = prepare_voter_request(task, slug, runner.gcs_data, context)
+        except AmbiguousInput as error:
+            return SpecialistResult(
+                task_id=task.task_id,
+                agent="voter",
+                status="needs_clarification",
+                missing_inputs=[str(error)],
+            )
+        validate_demographic_intent(
+            task.voter_request, question, voter_catalog(slug, runner.gcs_data)
+        )
         result = sql_specialist(task, slug, meta, runner, question)
         remember_population(task, result, slug, runner.gcs_data, context)
         return result
@@ -255,385 +321,1041 @@ def run_specialist(task, slug, meta, runner, voter_context=None, question=""):
     return sql_specialist(task, slug, meta, runner)
 
 
-def run_coordinator(question, constituency_id, session_id, history, pending_state, runner, voter_context=None):
-    slug = constituency_id.strip().lower()
-    meta = runner.load_constituency_meta(slug)
-    try:
-        source_catalog = voter_catalog(slug, runner.gcs_data)
-    except Exception:
-        source_catalog = {"constituency_id": slug, "available": None, "reason": "Catalog could not be loaded; inspect the source before answering."}
-    system = runner.load_prompt("coordinator_system.txt", **meta)
-    system += "\n" + runner.answer_style_instruction(question)
-    system += "\nCurrent date in Asia/Kolkata: " + datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
-    electoral = electoral_request(question, history)
-    catalog = None
-    if electoral:
+class CoordinatorState(TypedDict, total=False):
+    """Invocation state; the private session store owns durable conversation state."""
+
+    action: CoordinatorAction
+    agent_path: list[str]
+    allowed_agents: list[str] | None
+    batch: list
+    calls: int
+    catalog: list | dict | None
+    constituency_id: str
+    corrections: list[str]
+    electoral: bool
+    fingerprints: set[str]
+    first_action: bool
+    conversation: list[dict]
+    last_error: str | None
+    meta: dict
+    next_node: str
+    objective: str
+    output: dict
+    pending: dict
+    pending_state: dict | None
+    pending_tasks: list
+    previous_clarification: str | None
+    question: str
+    reference_evidence: dict | None
+    reference_loaded: bool
+    rejection_count: int
+    request_id: str
+    requirements: AnswerRequirements
+    research_calls: int
+    results: dict
+    session_id: str
+    slug: str
+    source_catalog: dict
+    started: float
+    system: str
+    tasks: dict
+    terminal: str
+    trace: list[dict]
+    turns: int
+    versions: dict
+    voter_context: dict
+    working: dict
+
+
+class Coordinator:
+    """Node implementations operating on explicit LangGraph state."""
+
+    def __init__(self, state, runner):
+        self.__dict__.update(copy.deepcopy(state))
+        self.runner = runner
+
+    def prepare(self):
+        self.slug = self.constituency_id.strip().lower()
+        self.meta = self.runner.load_constituency_meta(self.slug)
         try:
-            catalog = election_catalog(slug, runner.gcs_data)
+            self.source_catalog = voter_catalog(self.slug, self.runner.gcs_data)
         except Exception:
-            catalog = {"status": "unavailable", "instruction": "Ask history to inspect source availability"}
-    system += "\nConstituency data coverage: " + meta.get("data_coverage", "{}")
-    system += ("\nRespect data coverage. Unavailable voter or portfolio data has not been added; "
-               "never interpret missing data as zero voters. Do not delegate to unavailable specialists. "
-               "For partial voter coverage, describe totals and absence claims as applying only to available records, "
-               "never the entire constituency. Owner-declared coverage is not independently verified. "
-               "History and public research remain independent of voter coverage.")
-    # Only server-owned pending state is accepted here, never client task state.
-    pending = pending_state or {}
-    objective = pending.get("objective", resolve_electoral_objective(question, history))
-    tasks = dict(pending.get("tasks", {}))
-    results = dict(pending.get("results", {}))
-    # Context observations are recreated from current sources, never adopted
-    # from a previous pending turn where source versions may have changed.
-    for key in ("_history_catalog", "_verified_person"):
-        tasks.pop(key, None)
-        results.pop(key, None)
-    versions = {}
-    for key, previous in list(results.items()):
-        for source in previous.get("sources", []):
-            filename, version = source.get("database"), source.get("data_version")
-            if filename in {"voters.db", "history.db"} and version:
-                if filename not in versions:
-                    try:
-                        versions[filename] = data_version(slug, runner.gcs_data, filename)
-                    except Exception:
-                        versions[filename] = None
-                if versions[filename] != version:
-                    results.pop(key, None)
-                    break
-    agent_path, corrections, fingerprints = [], [], set()
-    calls = 0
-    research_calls = 0
-    voter_context = copy.deepcopy(voter_context or {})
-    trace = []
-    request_id = uuid4().hex
-    started = time.monotonic()
-    requirements = AnswerRequirements.model_validate(pending.get("answer_requirements", infer_requirements(objective).model_dump()))
-    working = copy.deepcopy(voter_context.pop("_working_context", {}))
-    if requirements.intent == "election_ranking" and requirements.year is None and working.get("year"):
-        requirements.year = working["year"]
-    last_error = None
-    first_action = True
-    rejection_count = 0
-    terminal = "turn_limit"
-    allowed_agents = source_policy(question) or pending.get("allowed_agents") or source_policy(objective)
-    previous_clarification = pending.get("clarification_question")
-    reference_evidence, reference_loaded = None, False
-    if allowed_agents:
-        tasks = {key: value for key, value in tasks.items() if value.get("agent") in allowed_agents}
-        results = {key: value for key, value in results.items() if value.get("agent") in allowed_agents}
+            self.source_catalog = {
+                "constituency_id": self.slug,
+                "available": None,
+                "reason": "Catalog could not be loaded; inspect the source before answering.",
+            }
+        self.system = self.runner.load_prompt("coordinator_system.txt", **self.meta)
+        self.system += "\n" + self.runner.answer_style_instruction(self.question)
+        self.system += (
+            "\nCurrent date in Asia/Kolkata: "
+            + datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+        )
+        self.electoral = electoral_request(self.question, self.conversation)
+        self.catalog = None
+        if self.electoral:
+            try:
+                self.catalog = election_catalog(self.slug, self.runner.gcs_data)
+            except Exception:
+                self.catalog = {
+                    "status": "unavailable",
+                    "instruction": "Ask history to inspect source availability",
+                }
+        self.system += "\nConstituency data coverage: " + self.meta.get(
+            "data_coverage", "{}"
+        )
+        self.system += "\nRespect data coverage. Unavailable voter or portfolio data has not been added; never interpret missing data as zero voters. Do not delegate to unavailable specialists. For partial voter coverage, describe totals and absence claims as applying only to available records, never the entire constituency. Owner-declared coverage is not independently verified. History and public research remain independent of voter coverage."
+        self.pending = self.pending_state or {}
+        self.objective = self.pending.get(
+            "objective", resolve_electoral_objective(self.question, self.conversation)
+        )
+        self.tasks = dict(self.pending.get("tasks", {}))
+        self.results = dict(self.pending.get("results", {}))
+        for key in ("_history_catalog", "_verified_person"):
+            self.tasks.pop(key, None)
+            self.results.pop(key, None)
+        self.versions = {}
+        for key, previous in list(self.results.items()):
+            for source in previous.get("sources", []):
+                filename, version = (source.get("database"), source.get("data_version"))
+                if filename in {"voters.db", "history.db"} and version:
+                    if filename not in self.versions:
+                        try:
+                            self.versions[filename] = data_version(
+                                self.slug, self.runner.gcs_data, filename
+                            )
+                        except Exception:
+                            self.versions[filename] = None
+                    if self.versions[filename] != version:
+                        self.results.pop(key, None)
+                        break
+        self.agent_path, self.corrections, self.fingerprints = ([], [], set())
+        self.calls = 0
+        self.research_calls = 0
+        self.voter_context = copy.deepcopy(self.voter_context or {})
+        self.trace = []
+        self.request_id = uuid4().hex
+        self.started = time.monotonic()
+        self.requirements = AnswerRequirements.model_validate(
+            self.pending.get(
+                "answer_requirements", infer_requirements(self.objective).model_dump()
+            )
+        )
+        self.working = copy.deepcopy(self.voter_context.pop("_working_context", {}))
+        if (
+            self.requirements.intent == "election_ranking"
+            and self.requirements.year is None
+            and self.working.get("year")
+        ):
+            self.requirements.year = self.working["year"]
+        self.last_error = None
+        self.first_action = True
+        self.rejection_count = 0
+        self.terminal = "turn_limit"
+        self.allowed_agents = (
+            source_policy(self.question)
+            or self.pending.get("allowed_agents")
+            or source_policy(self.objective)
+        )
+        self.previous_clarification = self.pending.get("clarification_question")
+        self.reference_evidence, self.reference_loaded = (None, False)
+        if self.allowed_agents:
+            self.tasks = {
+                key: value
+                for key, value in self.tasks.items()
+                if value.get("agent") in self.allowed_agents
+            }
+            self.results = {
+                key: value
+                for key, value in self.results.items()
+                if value.get("agent") in self.allowed_agents
+            }
+        return "coordinator"
 
-
-    def response(answer, status, persist=False, sources=None, partial_reason=None):
-        value = {"answer": runner.clean_user_answer(answer, question), "charts": [],
-                 "session_id": session_id, "agent_path": agent_path, "status": status}
-        value["pending_state"] = {"objective": objective, "tasks": tasks, "results": compact_results(results, budget=240000),
-                                  "answer_requirements": requirements.model_dump(), "allowed_agents": allowed_agents,
-                                  "clarification_question": previous_clarification} if persist else None
-        voter_context["_working_context"] = working
-        value["voter_context"] = voter_context
-        value["diagnostics"] = [{"request_id": request_id, **item} for item in execution.events()[-6:] + trace[-8:]] + [
-            {"event": "terminal", "request_id": request_id, "reason": terminal, "status": status,
-             "elapsed_ms": int((time.monotonic() - started) * 1000)}]
+    def response(
+        self, answer, status, persist=False, sources=None, partial_reason=None
+    ):
+        value = {
+            "answer": self.runner.clean_user_answer(answer, self.question),
+            "charts": [],
+            "session_id": self.session_id,
+            "agent_path": self.agent_path,
+            "status": status,
+        }
+        value["pending_state"] = (
+            {
+                "objective": self.objective,
+                "tasks": self.tasks,
+                "results": compact_results(self.results, budget=240000),
+                "answer_requirements": self.requirements.model_dump(),
+                "allowed_agents": self.allowed_agents,
+                "clarification_question": self.previous_clarification,
+            }
+            if persist
+            else None
+        )
+        self.voter_context["_working_context"] = self.working
+        value["voter_context"] = self.voter_context
+        value["diagnostics"] = [
+            {"request_id": self.request_id, **item}
+            for item in execution.events()[-6:] + self.trace[-8:]
+        ] + [
+            {
+                "event": "terminal",
+                "request_id": self.request_id,
+                "reason": self.terminal,
+                "status": status,
+                "elapsed_ms": int((time.monotonic() - self.started) * 1000),
+            }
+        ]
         value["sources"] = sources or []
-        value["request_id"] = request_id
-        value["error_code"] = terminal if status == "failed" else None
-        value["turn_trace"] = {"catalog_version": CATALOG_VERSION, "deployment_revision": __import__("os").environ.get("K_REVISION", "local"), "request_id": request_id, "question": question[:1500],
-            "objective": objective[:1500], "status": status, "terminal": terminal,
-            "events": execution.events()[-24:] + trace[-32:]}
-        value["partial_reason"] = explain_partial(partial_reason, results, terminal, runner.wants_hindi(question)) if status == "partial" else None
+        value["request_id"] = self.request_id
+        value["error_code"] = self.terminal if status == "failed" else None
+        value["turn_trace"] = {
+            "catalog_version": CATALOG_VERSION,
+            "deployment_revision": __import__("os").environ.get("K_REVISION", "local"),
+            "request_id": self.request_id,
+            "question": self.question[:1500],
+            "objective": self.objective[:1500],
+            "status": status,
+            "terminal": self.terminal,
+            "events": execution.events()[-24:] + self.trace[-32:],
+        }
+        value["partial_reason"] = (
+            explain_partial(
+                partial_reason,
+                self.results,
+                self.terminal,
+                self.runner.wants_hindi(self.question),
+            )
+            if status == "partial"
+            else None
+        )
         return value
 
-    for _ in range(MAX_COORDINATOR_TURNS):
+    def coordinate(self):
+        if self.turns >= MAX_COORDINATOR_TURNS:
+            return "fallback"
+        self.turns += 1
         if execution.remaining() <= 0:
-            terminal = "deadline_exceeded"
-            break
-        if not reference_loaded:
-            reference_loaded = True
-            if not allowed_agents or "voter" in allowed_agents:
+            self.terminal = "deadline_exceeded"
+            return "fallback"
+        if not self.reference_loaded:
+            self.reference_loaded = True
+            if not self.allowed_agents or "voter" in self.allowed_agents:
                 try:
-                    reference_evidence = rehydrate_selected_voter(slug, runner.gcs_data, voter_context)
+                    self.reference_evidence = rehydrate_selected_voter(
+                        self.slug, self.runner.gcs_data, self.voter_context
+                    )
                 except Exception:
-                    reference_evidence = None
-                if reference_evidence:
-                    trace.append({"event": "verified_context_rehydrated", "agent": "voter", "sources": reference_evidence["sources"]})
-        if reference_evidence:
-            tasks["_verified_person"] = {"task_id": "_verified_person", "agent": "voter", "objective": "Current attributes of the previously selected verified person only"}
-            results["_verified_person"] = reference_evidence
-        if electoral and isinstance(catalog, list) and catalog and (not allowed_agents or "history" in allowed_agents):
-            tasks["_history_catalog"] = {"task_id": "_history_catalog", "agent": "history", "objective": "Available election periods and row counts only"}
-            results["_history_catalog"] = catalog_evidence(catalog)
-        context = {"original_objective": objective, "latest_user_message": question,
-                   "conversation": (history or [])[-12:], "tasks": tasks,
-                   "verified_voter_context": voter_context, "source_catalog": source_catalog,
-                   "max_tasks_per_action": min(8, MAX_SPECIALIST_CALLS - calls),
-                   "working_context": working, "answer_requirements": requirements.model_dump(),
-                   "pending_clarification": bool(pending),
-                   "resolved_scope": "whole_constituency" if whole_constituency(objective + " " + question) else "resolve_from_request",
-                   "allowed_agents": allowed_agents or ["voter", "history", "portfolio", "research"],
-                   "specialist_results": compact_results(results),
-                   "corrections": corrections[-2:],
-                   "remaining_specialist_calls": MAX_SPECIALIST_CALLS - calls}
-        context["research_scope_supported"] = research_supported(meta)
-        if electoral:
-            context["election_catalog"] = catalog
+                    self.reference_evidence = None
+                if self.reference_evidence:
+                    self.trace.append(
+                        {
+                            "event": "verified_context_rehydrated",
+                            "agent": "voter",
+                            "sources": self.reference_evidence["sources"],
+                        }
+                    )
+        if self.reference_evidence:
+            self.tasks["_verified_person"] = {
+                "task_id": "_verified_person",
+                "agent": "voter",
+                "objective": "Current attributes of the previously selected verified person only",
+            }
+            self.results["_verified_person"] = self.reference_evidence
+        if (
+            self.electoral
+            and isinstance(self.catalog, list)
+            and self.catalog
+            and (not self.allowed_agents or "history" in self.allowed_agents)
+        ):
+            self.tasks["_history_catalog"] = {
+                "task_id": "_history_catalog",
+                "agent": "history",
+                "objective": "Available election periods and row counts only",
+            }
+            self.results["_history_catalog"] = catalog_evidence(self.catalog)
+        context = {
+            "original_objective": self.objective,
+            "latest_user_message": self.question,
+            "conversation": (self.conversation or [])[-12:],
+            "tasks": self.tasks,
+            "verified_voter_context": self.voter_context,
+            "source_catalog": self.source_catalog,
+            "max_tasks_per_action": min(8, MAX_SPECIALIST_CALLS - self.calls),
+            "working_context": self.working,
+            "answer_requirements": self.requirements.model_dump(),
+            "pending_clarification": bool(self.pending),
+            "resolved_scope": "whole_constituency"
+            if whole_constituency(self.objective + " " + self.question)
+            else "resolve_from_request",
+            "allowed_agents": self.allowed_agents
+            or ["voter", "history", "portfolio", "research"],
+            "specialist_results": compact_results(self.results),
+            "corrections": self.corrections[-2:],
+            "remaining_specialist_calls": MAX_SPECIALIST_CALLS - self.calls,
+        }
+        context["research_scope_supported"] = research_supported(self.meta)
+        if self.electoral:
+            context["election_catalog"] = self.catalog
             context["electoral_request"] = True
-        context["remaining_research_calls"] = 2 - research_calls
+        context["remaining_research_calls"] = 2 - self.research_calls
         observations = context.pop("specialist_results")
-        raw = runner.gemini_chat([
-            {"role": "system", "content": system},
-            {"role": "user", "content": dump(context) + "\nSpecialist observations:\n" + runner.wrap_electoral(dump(observations))},
-        ], temperature=0.0, response_schema=CoordinatorAction.model_json_schema())
+        raw = self.runner.gemini_chat(
+            [
+                {"role": "system", "content": self.system},
+                {
+                    "role": "user",
+                    "content": dump(context)
+                    + "\nSpecialist observations:\n"
+                    + self.runner.wrap_electoral(dump(observations)),
+                },
+            ],
+            temperature=0.0,
+            response_schema=CoordinatorAction.model_json_schema(),
+        )
         if raw.startswith("<<LLM_ERROR"):
-            terminal = failure_kind(raw)
-            break
-        try:
-            action = CoordinatorAction.model_validate(runner.safe_json(raw))
-            trace.append({"event": "coordinator_action", "action": action.action, "request_id": request_id})
-            if first_action:
-                if action.objective_mode == "new":
-                    objective, tasks, results = resolve_electoral_objective(question, history), {}, {}
-                    pending = {}
-                    requirements = infer_requirements(question)
-                    allowed_agents = source_policy(question)
-                    previous_clarification = None
-                if action.answer_requirements:
-                    requirements = resolve_requirements(objective, action.answer_requirements, working)
-                first_action = False
-            if action.action == "clarify":
-                validate_clarification(action, requirements, bool(results), objective + " " + question, previous_clarification)
-                previous_clarification = action.answer
-                logger.info("Coordinator awaiting clarification; completed calls=%d", calls)
-                terminal = "user_clarification"
-                return response(action.answer, "needs_clarification", True)
-            if action.action == "finish":
-                validate_electoral_finish(action, electoral, results, question)
-                if action.answer_kind == "conversation":
-                    if re.search(r"\bhow many\b|\bcount\b|कितने|कितनी|गिनती", question, re.I) or (history and re.search(r"wrong|incorrect|mistake|category|caste|गलत|जाति|वर्ग", question, re.I)):
-                        raise ValueError("A count request is data, not conversation. Delegate to the appropriate specialist and cite its executed result.")
-                    terminal = "conversation_completed"
-                    return response(action.answer, "complete", persist=bool(pending))
-                unresolved = [r for r in results.values() if r["status"] == "needs_clarification"]
-                if unresolved:
-                    raise ValueError("Resolve missing inputs or ask the user; do not finish while specialist clarification is pending. Reuse the task_id when revising its task.")
-                ids = action.evidence_task_ids
-                if any(i not in results for i in ids):
-                    raise ValueError("Final answer cites unknown task IDs. Current citable task IDs: " + ", ".join(results) + ". Prior-turn task IDs are not current evidence. Cite _verified_person only for that selected person's attributes; otherwise delegate a new specialist task.")
-                if ids and set(ids) == {"_verified_person"} and re.search(r"\bhow many\b|\bcount\b|\btotal\b|कितने|कितनी|कुल|गिनती", question, re.I):
-                    raise ValueError("A selected-person lookup cannot establish a population count. Delegate a Voter count with the complete intended population and filters.")
-                if allowed_agents and any(results[i]["agent"] not in allowed_agents for i in ids):
-                    raise ValueError("Final evidence must respect the user's source restriction")
-                supported = [results[i] for i in ids if results[i]["facts"] and results[i]["status"] in ("complete", "partial")]
-                verified = any(r["status"] in {"complete", "partial"} and any(
-                    not f.get("no_verified_findings") and not f.get("search_leads_only") for f in r["facts"])
-                    for key, r in results.items() if (key != "_history_catalog" or coverage_request(question))
-                    and (key != "_verified_person" or key in ids))
-                unavailable = action.status in {"failed", "partial"} and results and not verified
-                if not supported and not unavailable:
-                    reference = voter_context.get("selected_reference")
-                    if reference:
-                        raise ValueError("No current executed evidence supports this data answer. Delegate a Voter lookup with voter_request operation=lookup and reference=" + reference + ", then cite that task. Do not repeat finish using conversation prose.")
-                    raise ValueError("A data answer needs evidence_task_ids with successful facts. Delegate the appropriate specialist now; do not repeat finish or ask the user to fix an internal assignment.")
-                validate_zero_claim(action.answer, supported)
-                validate_count_answer(action.answer, supported)
-                count_answer = render_count(supported, runner.wants_hindi(question))
-                if count_answer:
-                    action.answer = count_answer
-                ranking = None
-                if requirements.intent == "election_ranking" and action.status != "failed":
-                    try:
-                        ranking = ranking_rows(requirements, supported, tasks)
-                    except ValueError:
-                        if action.status != "partial" or not any(r.get("gaps") for r in supported):
-                            raise
-                        action.answer = "The requested ranking could not be established: " + "; ".join(
-                            gap for r in supported for gap in r.get("gaps", []))
-                if requirements.intent == "public_history" and action.status == "complete":
-                    if not any(r["agent"] == "research" and any(f.get("text") for f in r["facts"]) for r in supported):
-                        raise ValueError("General historical background requires public research findings, not electoral rows")
-                web = [result for result in supported if result["agent"] == "research"]
-                source_map = {source["source_id"]: source for result in web for source in result["sources"]
-                              if source.get("source_id") and canonical(source.get("url"))}
-                cited = set(re.findall(r"\[(R[^\]\s]+)\]", action.answer))
-                if cited - source_map.keys():
-                    raise ValueError("Final answer contains unknown web citations; use source_id values from cited research tasks")
-                factual_ids = {sid for result in web for fact in result["facts"] if fact.get("text") for sid in fact.get("source_ids", [])}
-                if factual_ids and not cited.intersection(factual_ids):
-                    raise ValueError("Public research findings require inline [source_id] citations in the final answer")
-                if cited and factual_ids and cited - factual_ids:
-                    raise ValueError("Cite sources supporting verified research findings, not unread search leads")
-                final_sources = [source_map[sid] for sid in dict.fromkeys(re.findall(r"\[(R[^\]\s]+)\]", action.answer))]
-                if web and not factual_ids and not cited:
-                    final_sources = list(source_map.values())[:8]
-                offered = [item["reference"] for result in supported for fact in result["facts"]
-                           for item in fact.get("voter_references", [])]
-                if action.selected_voter_reference:
-                    if action.selected_voter_reference not in offered:
-                        raise ValueError("Select a voter reference from the cited, verified lookup results")
-                    voter_context["selected_reference"] = action.selected_voter_reference
-                elif offered:
-                    choices = list(dict.fromkeys(
-                        item["reference"] for result in supported
-                        if not tasks.get(result["task_id"], {}).get("household_query")
-                        for fact in result["facts"] for item in fact.get("voter_references", [])
-                    ))
-                    if choices:
-                        voter_context["selected_reference"] = choices[0] if len(choices) == 1 else None
-                status = action.status
-                if status == "complete" and any(r["status"] != "complete" or r.get("gaps") for r in supported):
-                    status = "partial"
-                if ranking:
-                    action.answer = render_ranking(ranking, requirements, meta["name"], runner.wants_hindi(question))
-                    caveats = list(dict.fromkeys(gap for r in supported for gap in r.get("gaps", []) + r.get("limitations", [])))
-                    if caveats:
-                        action.answer += "\n" + "; ".join(caveats)
-                if supported:
-                    if any(r.get("task_id") == "_verified_person" for r in supported) and "voter_agent" not in agent_path:
-                        agent_path.append("voter_agent")
-                    if electoral and not coverage_request(question):
-                        action.answer = scope_lok_answer(action.answer, supported, meta["name"], runner.wants_hindi(question))
-                    working["last_objective"] = objective[:500]
-                    if ranking:
-                        working.update({"year": requirements.year, "geography": requirements.geography})
-                verified_booths = [f.get("resolved_booth") for r in supported for f in r["facts"] if f.get("resolved_booth")]
-                if len(verified_booths) == 1:
-                    working["booth"] = verified_booths[0]
-                terminal = "completed" if status == "complete" else "partial_evidence" if status == "partial" else "unavailable_evidence"
-                return response(action.answer, status, sources=final_sources, partial_reason=action.partial_reason)
-            for task in action.tasks:
-                explicit_booths = set(re.findall(r"\b(?:booth|part)\s*(?:number|no\.?|#)?\s*(\d+)\b|बूथ\s*(\d+)", question, re.I))
-                explicit_booths = {a or b for a, b in explicit_booths}
-                if (task.voter_request and task.voter_request.operation in {"count", "lookup"}
-                    and len(action.tasks) == 1 and len(explicit_booths) == 1
-                    and not re.search(r"percentage|share|compare|versus|\bvs\b|प्रतिशत|तुलना", question, re.I)):
-                    if not task.voter_request.booth:
-                        task.voter_request.booth = next(iter(explicit_booths))
-                if task.booth_analysis_request:
-                    task.constraints = task.booth_analysis_request.model_dump()
-                if task.history_request:
-                    task.constraints = {**task.constraints, **task.history_request.model_dump(exclude_none=True)}
-                if task.agent == "voter" and task.voter_request and re.search(r"\bhow many\b|कितने|कितनी", question, re.I):
-                    if task.voter_request.operation in {"lookup", "explore"}:
-                        raise ValueError("Preserve the requested count operation in voter_request; do not convert it into lookup or profile.")
-                if task.task_id in {"_history_catalog", "_verified_person"}:
-                    raise ValueError("This task ID is server-owned context evidence; use a new task ID for a specialist assignment")
-                if allowed_agents and task.agent not in allowed_agents:
-                    raise ValueError("The user explicitly restricted the source. Delegate only to: " + ", ".join(allowed_agents))
-                if task.agent == "portfolio" and not task.constraints.get("booth") and whole_constituency(objective + " " + question):
-                    raise ValueError("Portfolio requires an individual booth identifier. For this whole-constituency request, use an aggregate source; do not ask the user to supply a booth list.")
-                if execution.remaining(reserve=15) <= 0:
-                    terminal = "deadline_exceeded"
-                    raise ValueError("Specialist time budget exhausted; finish with available evidence and limitations")
-                prepare_task(task, requirements)
-                if calls >= MAX_SPECIALIST_CALLS:
-                    raise ValueError("Specialist call limit reached; finish from supported evidence or ask for clarification")
-                if task.agent == "research":
-                    if research_calls >= 2:
-                        raise ValueError("Research call budget reached; finish with available evidence and limitations")
-                fingerprint = dump(task.model_dump(exclude={"task_id"}))
-                if fingerprint in fingerprints:
-                    raise ValueError("Identical task already executed. Inspect its result and revise the task instead of repeating it.")
-                # No raw-question fallback: every call must have its own validated assignment.
-                fingerprints.add(fingerprint)
-                if task.agent == "research":
-                    research_calls += 1
-                calls += 1
-                tasks[task.task_id] = task.model_dump()
-                logger.info("Delegating task=%s agent=%s", task.task_id, task.agent)
+            self.terminal = failure_kind(raw)
+            return "fallback"
+        self.action = CoordinatorAction.model_validate(self.runner.safe_json(raw))
+        return "validate"
+
+    def validate(self):
+        action = self.action
+        self.trace.append(
+            {
+                "event": "coordinator_action",
+                "action": action.action,
+                "request_id": self.request_id,
+            }
+        )
+        if self.first_action:
+            if action.objective_mode == "new":
+                self.objective, self.tasks, self.results = (
+                    resolve_electoral_objective(self.question, self.conversation),
+                    {},
+                    {},
+                )
+                self.pending = {}
+                self.requirements = infer_requirements(self.question)
+                self.allowed_agents = source_policy(self.question)
+                self.previous_clarification = None
+            if action.answer_requirements:
+                self.requirements = resolve_requirements(
+                    self.objective, action.answer_requirements, self.working
+                )
+            self.first_action = False
+        if action.action == "clarify":
+            validate_clarification(
+                action,
+                self.requirements,
+                bool(self.results),
+                self.objective + " " + self.question,
+                self.previous_clarification,
+            )
+            self.previous_clarification = action.answer
+            logger.info(
+                "Coordinator awaiting clarification; completed calls=%d", self.calls
+            )
+            self.terminal = "user_clarification"
+            return self.response(action.answer, "needs_clarification", True)
+        if action.action == "finish":
+            validate_electoral_finish(
+                action, self.electoral, self.results, self.question
+            )
+            if action.answer_kind == "conversation":
+                if re.search(
+                    "\\bhow many\\b|\\bcount\\b|कितने|कितनी|गिनती", self.question, re.I
+                ) or (
+                    self.conversation
+                    and re.search(
+                        "wrong|incorrect|mistake|category|caste|गलत|जाति|वर्ग",
+                        self.question,
+                        re.I,
+                    )
+                ):
+                    raise ValueError(
+                        "A count request is data, not conversation. Delegate to the appropriate specialist and cite its executed result."
+                    )
+                self.terminal = "conversation_completed"
+                return self.response(
+                    action.answer, "complete", persist=bool(self.pending)
+                )
+            unresolved = [
+                r for r in self.results.values() if r["status"] == "needs_clarification"
+            ]
+            if unresolved:
+                raise ValueError(
+                    "Resolve missing inputs or ask the user; do not finish while specialist clarification is pending. Reuse the task_id when revising its task."
+                )
+            ids = action.evidence_task_ids
+            if any((i not in self.results for i in ids)):
+                raise ValueError(
+                    "Final answer cites unknown task IDs. Current citable task IDs: "
+                    + ", ".join(self.results)
+                    + ". Prior-turn task IDs are not current evidence. Cite _verified_person only for that selected person's attributes; otherwise delegate a new specialist task."
+                )
+            if (
+                ids
+                and set(ids) == {"_verified_person"}
+                and re.search(
+                    "\\bhow many\\b|\\bcount\\b|\\btotal\\b|कितने|कितनी|कुल|गिनती",
+                    self.question,
+                    re.I,
+                )
+            ):
+                raise ValueError(
+                    "A selected-person lookup cannot establish a population count. Delegate a Voter count with the complete intended population and filters."
+                )
+            if self.allowed_agents and any(
+                (self.results[i]["agent"] not in self.allowed_agents for i in ids)
+            ):
+                raise ValueError(
+                    "Final evidence must respect the user's source restriction"
+                )
+            supported = [
+                self.results[i]
+                for i in ids
+                if self.results[i]["facts"]
+                and self.results[i]["status"] in ("complete", "partial")
+            ]
+            verified = any(
+                (
+                    r["status"] in {"complete", "partial"}
+                    and any(
+                        (
+                            not f.get("no_verified_findings")
+                            and (not f.get("search_leads_only"))
+                            for f in r["facts"]
+                        )
+                    )
+                    for key, r in self.results.items()
+                    if (key != "_history_catalog" or coverage_request(self.question))
+                    and (key != "_verified_person" or key in ids)
+                )
+            )
+            unavailable = (
+                action.status in {"failed", "partial"}
+                and self.results
+                and (not verified)
+            )
+            if not supported and (not unavailable):
+                reference = self.voter_context.get("selected_reference")
+                if reference:
+                    raise ValueError(
+                        "No current executed evidence supports this data answer. Delegate a Voter lookup with voter_request operation=lookup and reference="
+                        + reference
+                        + ", then cite that task. Do not repeat finish using conversation prose."
+                    )
+                raise ValueError(
+                    "A data answer needs evidence_task_ids with successful facts. Delegate the appropriate specialist now; do not repeat finish or ask the user to fix an internal assignment."
+                )
+            validate_zero_claim(action.answer, supported)
+            validate_count_answer(action.answer, supported)
+            count_answer = render_count(
+                supported, self.runner.wants_hindi(self.question)
+            )
+            if count_answer:
+                action.answer = count_answer
+            ranking = None
+            if (
+                self.requirements.intent == "election_ranking"
+                and action.status != "failed"
+            ):
                 try:
-                    result = run_specialist(task, slug, meta, runner, voter_context, question)
-                    for source in result.sources:
-                        filename = source.get("database")
-                        if filename in {"voters.db", "history.db"}:
-                            source["data_version"] = data_version(slug, runner.gcs_data, filename)
-                    remember_voters(result, slug, runner.gcs_data, voter_context)
-                except Exception as error:
-                    result = SpecialistResult(task_id=task.task_id, agent=task.agent, status="failed", errors=[str(error)],
-                        failure_code=error.kind if isinstance(error, ModelFailure) else None)
-                results[task.task_id] = result.model_dump()
-                trace.append({"task_id": task.task_id, "agent": task.agent, "status": result.status,
-                              "operation": task.voter_request.operation if task.voter_request else "household_lookup" if task.household_query else "name_query" if task.name_query else "web_research" if task.research_query else "research",
-                              "filters": task.voter_request.model_dump() if task.voter_request else task.household_query.model_dump() if task.household_query else task.name_query.model_dump() if task.name_query else task.constraints,
-                              "errors": result.errors, "missing_inputs": result.missing_inputs, "failure_code": result.failure_code,
-                              "resolved_scopes": [fact["count_scope"] for fact in result.facts if "count_scope" in fact],
-                              "counts": [fact.get("total", fact.get("row_count")) for fact in result.facts
-                                         if "total" in fact or "row_count" in fact],
-                              "sources": [{k: source[k] for k in ("database", "data_version", "source_id", "source_file") if k in source}
-                                          for source in result.sources]})
-                # Store bounded query diagnostics privately, never in logs or the API response.
-                for saved, source in zip(trace[-1]["sources"], result.sources):
-                    if source.get("sql"):
-                        saved["sql"] = str(source["sql"])[:4000]
-                        saved["sql_truncated"] = len(str(source["sql"])) > 4000
-                    if "parameters" in source:
-                        saved["parameters"] = [str(value)[:500] for value in source["parameters"][:32]]
-                        saved["parameters_truncated"] = len(source["parameters"]) > 32 or any(len(str(value)) > 500 for value in source["parameters"])
-                logger.info("Specialist task=%s status=%s", task.task_id, result.status)
-                agent_path.append(f"{task.agent}_agent")
-                rejection_count, last_error = 0, None
-        except (ValidationError, ValueError) as error:
-            message = ("Invalid structured action: " + dump(error.errors(include_input=False, include_context=False))
-                       if isinstance(error, ValidationError) else str(error))
-            corrections.append(message[:2000])
-            trace.append({"event": "coordinator_rejected", "reason": message[:2000], "request_id": request_id})
-            rejection_count = rejection_count + 1 if message == last_error else 1
-            last_error = message
-            if rejection_count >= 2:
-                terminal = "repeated_invalid_action"
-                break
-    # Unrelated context facts cannot turn a failed operation into a partial
-    # answer or serve as fallback evidence for a different subject.
-    results = {key: value for key, value in results.items() if key not in {"_verified_person", "_history_catalog"}}
-    missing = [item for result in results.values() for item in result.get("missing_inputs", [])]
-    if missing:
-        terminal = "user_clarification"
-        return response("\n".join(dict.fromkeys(missing)), "needs_clarification", True)
-    usable = [r for r in results.values() if r["status"] in {"complete", "partial"}]
-    if requirements.intent == "election_ranking":
+                    ranking = ranking_rows(self.requirements, supported, self.tasks)
+                except ValueError:
+                    if action.status != "partial" or not any(
+                        (r.get("gaps") for r in supported)
+                    ):
+                        raise
+                    action.answer = (
+                        "The requested ranking could not be established: "
+                        + "; ".join(
+                            (gap for r in supported for gap in r.get("gaps", []))
+                        )
+                    )
+            if (
+                self.requirements.intent == "public_history"
+                and action.status == "complete"
+            ):
+                if not any(
+                    (
+                        r["agent"] == "research"
+                        and any((f.get("text") for f in r["facts"]))
+                        for r in supported
+                    )
+                ):
+                    raise ValueError(
+                        "General historical background requires public research findings, not electoral rows"
+                    )
+            web = [result for result in supported if result["agent"] == "research"]
+            source_map = {
+                source["source_id"]: source
+                for result in web
+                for source in result["sources"]
+                if source.get("source_id") and canonical(source.get("url"))
+            }
+            cited = set(re.findall("\\[(R[^\\]\\s]+)\\]", action.answer))
+            if cited - source_map.keys():
+                raise ValueError(
+                    "Final answer contains unknown web citations; use source_id values from cited research tasks"
+                )
+            factual_ids = {
+                sid
+                for result in web
+                for fact in result["facts"]
+                if fact.get("text")
+                for sid in fact.get("source_ids", [])
+            }
+            if factual_ids and (not cited.intersection(factual_ids)):
+                raise ValueError(
+                    "Public research findings require inline [source_id] citations in the final answer"
+                )
+            if cited and factual_ids and cited - factual_ids:
+                raise ValueError(
+                    "Cite sources supporting verified research findings, not unread search leads"
+                )
+            final_sources = [
+                source_map[sid]
+                for sid in dict.fromkeys(
+                    re.findall("\\[(R[^\\]\\s]+)\\]", action.answer)
+                )
+            ]
+            if web and (not factual_ids) and (not cited):
+                final_sources = list(source_map.values())[:8]
+            offered = [
+                item["reference"]
+                for result in supported
+                for fact in result["facts"]
+                for item in fact.get("voter_references", [])
+            ]
+            if action.selected_voter_reference:
+                if action.selected_voter_reference not in offered:
+                    raise ValueError(
+                        "Select a voter reference from the cited, verified lookup results"
+                    )
+                self.voter_context["selected_reference"] = (
+                    action.selected_voter_reference
+                )
+            elif offered:
+                choices = list(
+                    dict.fromkeys(
+                        (
+                            item["reference"]
+                            for result in supported
+                            if not self.tasks.get(result["task_id"], {}).get(
+                                "household_query"
+                            )
+                            for fact in result["facts"]
+                            for item in fact.get("voter_references", [])
+                        )
+                    )
+                )
+                if choices:
+                    self.voter_context["selected_reference"] = (
+                        choices[0] if len(choices) == 1 else None
+                    )
+            status = action.status
+            if status == "complete" and any(
+                (r["status"] != "complete" or r.get("gaps") for r in supported)
+            ):
+                status = "partial"
+            if ranking:
+                action.answer = render_ranking(
+                    ranking,
+                    self.requirements,
+                    self.meta["name"],
+                    self.runner.wants_hindi(self.question),
+                )
+                caveats = list(
+                    dict.fromkeys(
+                        (
+                            gap
+                            for r in supported
+                            for gap in r.get("gaps", []) + r.get("limitations", [])
+                        )
+                    )
+                )
+                if caveats:
+                    action.answer += "\n" + "; ".join(caveats)
+            if supported:
+                if (
+                    any((r.get("task_id") == "_verified_person" for r in supported))
+                    and "voter_agent" not in self.agent_path
+                ):
+                    self.agent_path.append("voter_agent")
+                if self.electoral and (not coverage_request(self.question)):
+                    action.answer = scope_lok_answer(
+                        action.answer,
+                        supported,
+                        self.meta["name"],
+                        self.runner.wants_hindi(self.question),
+                    )
+                self.working["last_objective"] = self.objective[:500]
+                if ranking:
+                    self.working.update(
+                        {
+                            "year": self.requirements.year,
+                            "geography": self.requirements.geography,
+                        }
+                    )
+            verified_booths = [
+                f.get("resolved_booth")
+                for r in supported
+                for f in r["facts"]
+                if f.get("resolved_booth")
+            ]
+            if len(verified_booths) == 1:
+                self.working["booth"] = verified_booths[0]
+            self.terminal = (
+                "completed"
+                if status == "complete"
+                else "partial_evidence"
+                if status == "partial"
+                else "unavailable_evidence"
+            )
+            return self.response(
+                action.answer,
+                status,
+                sources=final_sources,
+                partial_reason=action.partial_reason,
+            )
+        self.batch = action.tasks
+        self.pending_tasks = list(self.batch)
+        return "dispatch"
+
+    def specialize(self):
+        task = self.pending_tasks.pop(0)
+        explicit_booths = set(
+            re.findall(
+                "\\b(?:booth|part)\\s*(?:number|no\\.?|#)?\\s*(\\d+)\\b|बूथ\\s*(\\d+)",
+                self.question,
+                re.I,
+            )
+        )
+        explicit_booths = {a or b for a, b in explicit_booths}
+        if (
+            task.voter_request
+            and task.voter_request.operation in {"count", "lookup"}
+            and (len(self.batch) == 1)
+            and (len(explicit_booths) == 1)
+            and (
+                not re.search(
+                    "percentage|share|compare|versus|\\bvs\\b|प्रतिशत|तुलना",
+                    self.question,
+                    re.I,
+                )
+            )
+        ):
+            if not task.voter_request.booth:
+                task.voter_request.booth = next(iter(explicit_booths))
+        if task.booth_analysis_request:
+            task.constraints = task.booth_analysis_request.model_dump()
+        if task.history_request:
+            task.constraints = {
+                **task.constraints,
+                **task.history_request.model_dump(exclude_none=True),
+            }
+        if (
+            task.agent == "voter"
+            and task.voter_request
+            and re.search("\\bhow many\\b|कितने|कितनी", self.question, re.I)
+        ):
+            if task.voter_request.operation in {"lookup", "explore"}:
+                raise ValueError(
+                    "Preserve the requested count operation in voter_request; do not convert it into lookup or profile."
+                )
+        if task.task_id in {"_history_catalog", "_verified_person"}:
+            raise ValueError(
+                "This task ID is server-owned context evidence; use a new task ID for a specialist assignment"
+            )
+        if self.allowed_agents and task.agent not in self.allowed_agents:
+            raise ValueError(
+                "The user explicitly restricted the source. Delegate only to: "
+                + ", ".join(self.allowed_agents)
+            )
+        if (
+            task.agent == "portfolio"
+            and (not task.constraints.get("booth"))
+            and whole_constituency(self.objective + " " + self.question)
+        ):
+            raise ValueError(
+                "Portfolio requires an individual booth identifier. For this whole-constituency request, use an aggregate source; do not ask the user to supply a booth list."
+            )
+        if execution.remaining(reserve=15) <= 0:
+            self.terminal = "deadline_exceeded"
+            raise ValueError(
+                "Specialist time budget exhausted; finish with available evidence and limitations"
+            )
+        prepare_task(task, self.requirements)
+        if self.calls >= MAX_SPECIALIST_CALLS:
+            raise ValueError(
+                "Specialist call limit reached; finish from supported evidence or ask for clarification"
+            )
+        if task.agent == "research":
+            if self.research_calls >= 2:
+                raise ValueError(
+                    "Research call budget reached; finish with available evidence and limitations"
+                )
+        fingerprint = dump(task.model_dump(exclude={"task_id"}))
+        if fingerprint in self.fingerprints:
+            raise ValueError(
+                "Identical task already executed. Inspect its result and revise the task instead of repeating it."
+            )
+        self.fingerprints.add(fingerprint)
+        if task.agent == "research":
+            self.research_calls += 1
+        self.calls += 1
+        self.tasks[task.task_id] = task.model_dump()
+        logger.info("Delegating task=%s agent=%s", task.task_id, task.agent)
         try:
-            rows = ranking_rows(requirements, usable, tasks)
-            answer = render_ranking(rows, requirements, meta["name"], runner.wants_hindi(question))
-            working.update({"year": requirements.year, "geography": requirements.geography})
-            answer += "\n" + ("यह सत्यापित आंशिक उत्तर है।" if runner.wants_hindi(question) else "This is a verified partial answer from the available results.")
-            return response(answer, "partial")
-        except ValueError:
-            pass
-    # Recover sourced findings without requiring another model call at the deadline.
-    sources = {s["source_id"]: s for r in usable if r["agent"] == "research" for s in r["sources"]
-               if s.get("source_id") and canonical(s.get("url")) and s.get("read_status") == "page_read"}
-    findings = [f for r in usable if r["agent"] == "research" for f in r["facts"]
-                if f.get("text") and f.get("source_ids") and all(sid in sources for sid in f["source_ids"])]
-    if findings:
-        selected = findings[:3]
-        answer = ("आंशिक उत्तर:\n" if runner.wants_hindi(question) else "Partial answer:\n") + "\n".join(
-            f["text"] + " " + " ".join(f"[{sid}]" for sid in f["source_ids"]) for f in selected)
-        answer += "\n" + ("पूरा ऐतिहासिक विवरण स्थापित नहीं हो पाया।" if runner.wants_hindi(question) else "I could not complete all the details requested in this attempt.")
-        cited = list(dict.fromkeys(sid for f in selected for sid in f["source_ids"]))
-        return response(answer, "partial", sources=[sources[sid] for sid in cited])
-    if terminal in {"provider_capacity", "provider_unavailable", "provider_request_invalid"}:
-        return response(user_error(terminal, runner.wants_hindi(question)), "failed")
-    if terminal == "deadline_exceeded":
-        answer = "The request reached its time limit before a verified answer was ready. Please retry."
-    elif results and all(r["status"] == "failed" for r in results.values()):
-        codes = {r.get("failure_code") for r in results.values()}
-        if codes & {"provider_capacity", "provider_unavailable", "provider_request_invalid"}:
-            terminal = next(code for code in ("provider_request_invalid", "provider_capacity", "provider_unavailable") if code in codes)
-            return response(user_error(terminal, runner.wants_hindi(question)), "failed")
-        if "unsupported_scope" in codes:
-            answer = "Public research is currently supported only for the Prayagraj and Kaushambi pilot. This constituency is outside that coverage."
-            terminal = "unsupported_scope"
-        elif "configuration_missing" in codes:
-            answer = "Public research is currently unavailable because its search connection is not configured."
-            terminal = "configuration_missing"
-        elif "data_unavailable" in codes:
-            answer = "The records needed for this request are currently unavailable for the selected constituency."
-            terminal = "data_unavailable"
+            result = run_specialist(
+                task,
+                self.slug,
+                self.meta,
+                self.runner,
+                self.voter_context,
+                self.question,
+            )
+            for source in result.sources:
+                filename = source.get("database")
+                if filename in {"voters.db", "history.db"}:
+                    source["data_version"] = data_version(
+                        self.slug, self.runner.gcs_data, filename
+                    )
+            remember_voters(result, self.slug, self.runner.gcs_data, self.voter_context)
+        except Exception as error:
+            result = SpecialistResult(
+                task_id=task.task_id,
+                agent=task.agent,
+                status="failed",
+                errors=[str(error)],
+                failure_code=error.kind if isinstance(error, ModelFailure) else None,
+            )
+        self.results[task.task_id] = result.model_dump()
+        self.trace.append(
+            {
+                "task_id": task.task_id,
+                "agent": task.agent,
+                "status": result.status,
+                "operation": task.voter_request.operation
+                if task.voter_request
+                else "household_lookup"
+                if task.household_query
+                else "name_query"
+                if task.name_query
+                else "web_research"
+                if task.research_query
+                else "research",
+                "filters": task.voter_request.model_dump()
+                if task.voter_request
+                else task.household_query.model_dump()
+                if task.household_query
+                else task.name_query.model_dump()
+                if task.name_query
+                else task.constraints,
+                "errors": result.errors,
+                "missing_inputs": result.missing_inputs,
+                "failure_code": result.failure_code,
+                "resolved_scopes": [
+                    fact["count_scope"]
+                    for fact in result.facts
+                    if "count_scope" in fact
+                ],
+                "counts": [
+                    fact.get("total", fact.get("row_count"))
+                    for fact in result.facts
+                    if "total" in fact or "row_count" in fact
+                ],
+                "sources": [
+                    {
+                        k: source[k]
+                        for k in (
+                            "database",
+                            "data_version",
+                            "source_id",
+                            "source_file",
+                        )
+                        if k in source
+                    }
+                    for source in result.sources
+                ],
+            }
+        )
+        for saved, source in zip(self.trace[-1]["sources"], result.sources):
+            if source.get("sql"):
+                saved["sql"] = str(source["sql"])[:4000]
+                saved["sql_truncated"] = len(str(source["sql"])) > 4000
+            if "parameters" in source:
+                saved["parameters"] = [
+                    str(value)[:500] for value in source["parameters"][:32]
+                ]
+                saved["parameters_truncated"] = len(source["parameters"]) > 32 or any(
+                    (len(str(value)) > 500 for value in source["parameters"])
+                )
+        logger.info("Specialist task=%s status=%s", task.task_id, result.status)
+        self.agent_path.append(f"{task.agent}_agent")
+        self.rejection_count, self.last_error = (0, None)
+        return "dispatch"
+
+    def reject(self, error):
+        message = (
+            "Invalid structured action: "
+            + dump(error.errors(include_input=False, include_context=False))
+            if isinstance(error, ValidationError)
+            else str(error)
+        )
+        self.corrections.append(message[:2000])
+        self.trace.append(
+            {
+                "event": "coordinator_rejected",
+                "reason": message[:2000],
+                "request_id": self.request_id,
+            }
+        )
+        self.rejection_count = (
+            self.rejection_count + 1 if message == self.last_error else 1
+        )
+        self.last_error = message
+        if self.rejection_count >= 2:
+            self.terminal = "repeated_invalid_action"
+            return "fallback"
+        self.pending_tasks = []
+        return "coordinator"
+
+    def fallback(self):
+        self.results = {
+            key: value
+            for key, value in self.results.items()
+            if key not in {"_verified_person", "_history_catalog"}
+        }
+        missing = [
+            item
+            for result in self.results.values()
+            for item in result.get("missing_inputs", [])
+        ]
+        if missing:
+            self.terminal = "user_clarification"
+            return self.response(
+                "\n".join(dict.fromkeys(missing)), "needs_clarification", True
+            )
+        usable = [
+            r for r in self.results.values() if r["status"] in {"complete", "partial"}
+        ]
+        if self.requirements.intent == "election_ranking":
+            try:
+                rows = ranking_rows(self.requirements, usable, self.tasks)
+                answer = render_ranking(
+                    rows,
+                    self.requirements,
+                    self.meta["name"],
+                    self.runner.wants_hindi(self.question),
+                )
+                self.working.update(
+                    {
+                        "year": self.requirements.year,
+                        "geography": self.requirements.geography,
+                    }
+                )
+                answer += "\n" + (
+                    "यह सत्यापित आंशिक उत्तर है।"
+                    if self.runner.wants_hindi(self.question)
+                    else "This is a verified partial answer from the available results."
+                )
+                return self.response(answer, "partial")
+            except ValueError:
+                pass
+        sources = {
+            s["source_id"]: s
+            for r in usable
+            if r["agent"] == "research"
+            for s in r["sources"]
+            if s.get("source_id")
+            and canonical(s.get("url"))
+            and (s.get("read_status") == "page_read")
+        }
+        findings = [
+            f
+            for r in usable
+            if r["agent"] == "research"
+            for f in r["facts"]
+            if f.get("text")
+            and f.get("source_ids")
+            and all((sid in sources for sid in f["source_ids"]))
+        ]
+        if findings:
+            selected = findings[:3]
+            answer = (
+                "आंशिक उत्तर:\n"
+                if self.runner.wants_hindi(self.question)
+                else "Partial answer:\n"
+            ) + "\n".join(
+                (
+                    f["text"] + " " + " ".join((f"[{sid}]" for sid in f["source_ids"]))
+                    for f in selected
+                )
+            )
+            answer += "\n" + (
+                "पूरा ऐतिहासिक विवरण स्थापित नहीं हो पाया।"
+                if self.runner.wants_hindi(self.question)
+                else "I could not complete all the details requested in this attempt."
+            )
+            cited = list(
+                dict.fromkeys((sid for f in selected for sid in f["source_ids"]))
+            )
+            return self.response(
+                answer, "partial", sources=[sources[sid] for sid in cited]
+            )
+        if self.terminal in {
+            "provider_capacity",
+            "provider_unavailable",
+            "provider_request_invalid",
+        }:
+            return self.response(
+                user_error(self.terminal, self.runner.wants_hindi(self.question)),
+                "failed",
+            )
+        if self.terminal == "deadline_exceeded":
+            answer = "The request reached its time limit before a verified answer was ready. Please retry."
+        elif self.results and all(
+            (r["status"] == "failed" for r in self.results.values())
+        ):
+            codes = {r.get("failure_code") for r in self.results.values()}
+            if codes & {
+                "provider_capacity",
+                "provider_unavailable",
+                "provider_request_invalid",
+            }:
+                self.terminal = next(
+                    (
+                        code
+                        for code in (
+                            "provider_request_invalid",
+                            "provider_capacity",
+                            "provider_unavailable",
+                        )
+                        if code in codes
+                    )
+                )
+                return self.response(
+                    user_error(self.terminal, self.runner.wants_hindi(self.question)),
+                    "failed",
+                )
+            if "unsupported_scope" in codes:
+                answer = "Public research is currently supported only for the Prayagraj and Kaushambi pilot. This constituency is outside that coverage."
+                self.terminal = "unsupported_scope"
+            elif "configuration_missing" in codes:
+                answer = "Public research is currently unavailable because its search connection is not configured."
+                self.terminal = "configuration_missing"
+            elif "data_unavailable" in codes:
+                answer = "The records needed for this request are currently unavailable for the selected constituency."
+                self.terminal = "data_unavailable"
+            else:
+                answer = "I could not retrieve the information needed for this request. The source or service may be unavailable; please retry."
+        elif self.results:
+            answer = "I retrieved some information, but could not verify all the comparisons or details you requested. I cannot provide a complete answer from this attempt."
         else:
-            answer = "I could not retrieve the information needed for this request. The source or service may be unavailable; please retry."
-    elif results:
-        answer = "I retrieved some information, but could not verify all the comparisons or details you requested. I cannot provide a complete answer from this attempt."
-    else:
-        answer = "The AI service could not produce a valid answer for this request. Please retry."
-    if runner.wants_hindi(question):
-        answer = "इस प्रयास में आपके प्रश्न का सत्यापित उत्तर पूरा नहीं हो पाया। कृपया दोबारा प्रयास करें।"
-    return response(answer, "partial" if any(r["facts"] and r["status"] in {"complete", "partial"} for r in results.values()) else "failed")
+            answer = "The AI service could not produce a valid answer for this request. Please retry."
+        if self.runner.wants_hindi(self.question):
+            answer = "इस प्रयास में आपके प्रश्न का सत्यापित उत्तर पूरा नहीं हो पाया। कृपया दोबारा प्रयास करें।"
+        return self.response(
+            answer,
+            "partial"
+            if any(
+                (
+                    r["facts"] and r["status"] in {"complete", "partial"}
+                    for r in self.results.values()
+                )
+            )
+            else "failed",
+        )
+
+
+@lru_cache(maxsize=4)
+def build_graph(runner):
+    """Compile separate planning, validation, specialist and recovery nodes.
+
+    Cross-turn persistence and leases remain in the user-scoped session store.
+    No external checkpointer or tracing service is enabled here.
+    """
+    from langgraph.graph import END, START, StateGraph
+
+    def node(method):
+        def run(state):
+            context = Coordinator(state, runner)
+            try:
+                result = getattr(context, method)()
+            except (ValidationError, ValueError) as error:
+                if method in {"prepare", "fallback"}:
+                    raise
+                result = context.reject(error)
+            if isinstance(result, dict):
+                context.output, context.next_node = result, END
+            else:
+                context.next_node = result
+            return {
+                key: value for key, value in vars(context).items() if key != "runner"
+            }
+
+        return run
+
+    def dispatch(state):
+        pending = state.get("pending_tasks", [])
+        return {"next_node": pending[0].agent if pending else "coordinator"}
+
+    graph = StateGraph(CoordinatorState)
+    graph.add_node("prepare", node("prepare"))
+    graph.add_node("coordinator", node("coordinate"))
+    graph.add_node("validate", node("validate"))
+    graph.add_node("dispatch", dispatch)
+    for name in ("voter", "history", "portfolio", "research"):
+        graph.add_node(name, node("specialize"))
+    graph.add_node("fallback", node("fallback"))
+    graph.add_edge(START, "prepare")
+    routes = {
+        "prepare": ("coordinator",),
+        "coordinator": ("validate", "coordinator", "fallback"),
+        "validate": ("dispatch", "coordinator", "fallback", END),
+        "dispatch": ("voter", "history", "portfolio", "research", "coordinator"),
+        **{
+            name: ("dispatch", "coordinator", "fallback")
+            for name in ("voter", "history", "portfolio", "research")
+        },
+        "fallback": (END,),
+    }
+    for name, targets in routes.items():
+        graph.add_conditional_edges(
+            name,
+            lambda state: state["next_node"],
+            {target: target for target in targets},
+        )
+    return graph.compile()
+
+
+def run_coordinator(
+    question,
+    constituency_id,
+    session_id,
+    history,
+    pending_state,
+    runner,
+    voter_context=None,
+):
+    """Invoke the graph using the existing API/session contract."""
+    with tracing_context(enabled=False):
+        state = build_graph(runner).invoke(
+            {
+                "question": question,
+                "constituency_id": constituency_id,
+                "session_id": session_id,
+                "conversation": history or [],
+                "pending_state": pending_state,
+                "voter_context": voter_context or {},
+                "turns": 0,
+                "pending_tasks": [],
+            },
+            config={"recursion_limit": 128},
+        )
+    return state["output"]

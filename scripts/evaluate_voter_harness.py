@@ -21,7 +21,6 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--live', action='store_true')
     p.add_argument('--gcloud-auth', action='store_true')
-    p.add_argument('--ipv4', action='store_true', help='Use IPv4 for this local evaluation only')
     p.add_argument('--source-root', type=Path, default=Path(__file__).resolve().parents[1])
     p.add_argument('--trials', type=int, default=5)
     p.add_argument('--workers', type=int, default=3)
@@ -29,10 +28,6 @@ def main():
     args = p.parse_args()
     if not args.live or not 1 <= args.trials <= 10 or not 1 <= args.workers <= 3:
         p.error('Use --live, 1-10 trials, and 1-3 workers')
-    if args.ipv4:
-        import socket
-        from urllib3.util import connection
-        connection.allowed_gai_family = lambda: socket.AF_INET
     root = args.source_root.resolve()
     sys.path[:0] = [str(root / 'backend'), str(root)]
     from agents import local_runner as runner
