@@ -51,8 +51,10 @@ uvicorn app.main:app --port 8080 --reload
 ```
 
 `LOCAL_DEV_AUTH=true` explicitly enables header-free development access. The
-setting defaults to false. All Cloud Run deployment configurations set it to
-false; Firebase tokens and constituency access claims are then required.
+setting defaults to false. Current Cloud Run deployment configurations set it to
+true to support the demo frontend without Firebase credentials. This allows
+header-free access to every constituency and voter endpoint. Configure Firebase
+sign-in and set it to false before using the service as an authenticated app.
 Agent orchestration is independent of this setting.
 
 For the frontend:

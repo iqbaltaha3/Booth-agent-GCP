@@ -28,9 +28,12 @@ no separate agent deployment step.
 - Cloud Build permissions to push images and deploy Cloud Run using its runtime
   service account.
 
-Deploy files explicitly set `LOCAL_DEV_AUTH=false`. Cloud Run's public ingress
-allows the browser to reach FastAPI; application authentication still requires
-Firebase tokens. Keep CORS aligned with the frontend origin.
+The current demo frontend has no Firebase configuration and sends requests without
+a token. Deploy files explicitly set `LOCAL_DEV_AUTH=true` to match the earlier
+Cloud Run behavior. This grants header-free access to every constituency and
+voter endpoint while the service has public ingress. Turn it off when the
+frontend is configured for Firebase sign-in. Keep CORS aligned with the frontend
+origin.
 
 Cloud files are cached for the process lifetime. Restart/redeploy the backend
 after artifact replacement. Data import/upload scripts are maintained separately

@@ -21,7 +21,9 @@ Firestore prerequisites and test commands. Development dependencies are in
 
 Authentication defaults to required. For local development only, explicitly set
 `LOCAL_DEV_AUTH=true`. This setting does not change the agent runtime. Cloud Run
-configurations set `LOCAL_DEV_AUTH=false`.
+configurations currently set `LOCAL_DEV_AUTH=true` for the demo frontend. This
+allows header-free access to all constituency and voter endpoints until Firebase
+sign-in is configured in the frontend.
 
 `services/data.py` is the shared data implementation. Data access uses a
 seat-specific folder and read-only SQLite;

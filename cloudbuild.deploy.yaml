@@ -35,7 +35,7 @@ steps:
       - --memory=1Gi
       - --cpu=1
       - --timeout=600
-      - --update-env-vars=ENV=dev,REGION=asia-south1,LOCAL_DEV_AUTH=false,GCS_DATA_BUCKET=booth-agent-data-dev,GEMINI_MODEL=gemini-2.5-flash,CONSTITUENCIES_MANIFEST_PATH=/constituencies/manifest.json
+      - --update-env-vars=ENV=dev,REGION=asia-south1,LOCAL_DEV_AUTH=true,GCS_DATA_BUCKET=booth-agent-data-dev,GEMINI_MODEL=gemini-2.5-flash,CONSTITUENCIES_MANIFEST_PATH=/constituencies/manifest.json
       - --update-secrets=TAVILY_API_KEY=tavily-api-key:latest
 images:
   - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
