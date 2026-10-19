@@ -17,6 +17,13 @@ export type Constituency = {
   seat_type?: string;
   product_name?: string;
   product_tagline?: string;
+  coverage?: {
+    status?: string;
+    voter_available?: boolean;
+    completed_booths?: number | null;
+    total_booths?: number | null;
+    count_basis?: string;
+  };
 };
 
 export type WebSource = {
@@ -36,6 +43,7 @@ export type ChatResponse = {
   agent_path: string[];
   latency_ms?: number;
   status?: "complete" | "partial" | "needs_clarification" | "failed";
+  partial_reason?: string | null;
   sources?: WebSource[];
 };
 

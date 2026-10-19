@@ -34,6 +34,7 @@ type Msg = {
   agentPath?: string[];
   latencyMs?: number;
   sources?: WebSource[];
+  status?: ChatResponse["status"];
 };
 
 function citationParts(message: Msg) {
@@ -525,6 +526,7 @@ export default function HomePage() {
             agentPath: res.agent_path,
             latencyMs: res.latency_ms,
             sources: res.sources || [],
+            status: res.status,
           },
         ]);
       } catch (err) {
@@ -765,6 +767,17 @@ export default function HomePage() {
                 >
                   <div>
                     <p className="font-semibold text-navy-950">{c.name}</p>
+                    <p className="text-xs text-slate-500">
+                      {c.coverage?.voter_available === false
+                        ? (lang === "hi" ? "केवल चुनाव इतिहास · मतदाता डेटा बाकी है" : "Election history available · Voter data pending")
+                        : c.coverage?.completed_booths != null && c.coverage?.total_booths != null
+                          ? (lang === "hi"
+                            ? `${c.coverage.completed_booths}/${c.coverage.total_booths} बूथ उपलब्ध · ${c.coverage.total_booths - c.coverage.completed_booths} बाकी (घोषित)`
+                            : `${c.coverage.completed_booths}/${c.coverage.total_booths} booths available · ${c.coverage.total_booths - c.coverage.completed_booths} pending (declared)`)
+                          : c.coverage?.status === "complete_declared"
+                            ? (lang === "hi" ? "सभी बूथों का डेटा उपलब्ध है" : "Data available for all booths")
+                            : ""}
+                    </p>
                     <p className="text-sm text-slate-500">
                       {[c.district, c.state].filter(Boolean).join(", ")}
                     </p>
@@ -780,13 +793,6 @@ export default function HomePage() {
   }
 
   // ——— CHAT ———
-  const examples = [
-    t(lang, "example1"),
-    t(lang, "example2"),
-    t(lang, "example3"),
-    t(lang, "example4"),
-  ];
-
   return (
     <div className="flex h-screen flex-col bg-surface">
       <header className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-white px-3 py-2.5">
@@ -851,24 +857,13 @@ export default function HomePage() {
               <Logo size={48} />
             </div>
             <p className="text-lg font-semibold text-navy-950">
-              {t(lang, "taglineNative")}
+              {lang === "hi" ? "नमस्ते, मैं अर्जुन हूँ, आपका AI बूथ एजेंट।" : "Hi, I’m Arjun, your AI booth agent."}
             </p>
             <p className="mt-4 text-left text-sm font-medium text-slate-600">
-              {t(lang, "examples")}
+              {lang === "hi"
+                ? "आइए, साथ मिलकर आपके निर्वाचन क्षेत्र को समझें।"
+                : "Let’s explore your constituency together."}
             </p>
-            <ul className="mt-2 space-y-2 text-left">
-              {examples.map((ex) => (
-                <li key={ex}>
-                  <button
-                    type="button"
-                    onClick={() => ask(ex)}
-                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-sm text-navy-900 shadow-sm transition hover:border-gold"
-                  >
-                    {ex}
-                  </button>
-                </li>
-              ))}
-            </ul>
           </div>
         )}
 
@@ -881,6 +876,15 @@ export default function HomePage() {
               <div className="whitespace-pre-wrap text-[15px] leading-relaxed">
                 {citationParts(m)}
               </div>
+              {m.role === "arjun" && (m.status === "needs_clarification" || m.status === "failed") && (
+                <div className="mt-2 text-xs text-amber-800" role="status">
+                  <p className="font-medium">
+                    {m.status === "needs_clarification"
+                      ? (lang === "hi" ? "आपकी जानकारी चाहिए" : "Your clarification is needed")
+                      : (lang === "hi" ? "उत्तर पूरा नहीं हो पाया" : "Request could not be completed")}
+                  </p>
+                </div>
+              )}
               {!!m.sources?.length && (
                 <div className="mt-3 space-y-2 border-t border-slate-100 pt-2 text-xs text-slate-500">
                   <p className="font-medium">{lang === "hi" ? "स्रोत" : "Sources"}</p>
