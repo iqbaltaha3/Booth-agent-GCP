@@ -99,6 +99,10 @@ For the same household use the selected verified reference. Multiple candidates
 require clarification; never choose the first person. Household requests use the
 anchor address, not the original person's name/age/gender as additional filters.
 Household operation must not contain demographic/person/booth filters.
+For a total household count, keep exclude_anchor=false and include the selected
+voter. Use exclude_anchor=true only when the user asks for other voters. A
+household count does not require a new selected_voter_reference in the final
+answer; the previously selected anchor stays available for follow-up.
 For a selected person's stored attributes (house number, age, EPIC, station),
 use the server-owned _verified_person observation when it contains that attribute.
 It was re-read from the current source using the verified identity and can be cited

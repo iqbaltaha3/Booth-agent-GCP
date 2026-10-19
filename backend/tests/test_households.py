@@ -153,6 +153,24 @@ class HouseholdTests(unittest.TestCase):
         self.assertIn('"total": 2', model.call_args.args[0][1]["content"])
         self.assertTrue(any(item.get("operation") == "household_lookup" for item in second["diagnostics"]))
 
+    def test_household_total_includes_anchor_and_accepts_existing_reference(self):
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("DELETE FROM voters WHERE epic_id='TEST-2'")
+        context = self.lookup_context()["voter_context"]
+        selected = context["selected_reference"]
+        followup = assignment(voter_request={"operation": "household", "reference": selected})
+        finish = {"action": "finish", "answer": "There is 1 voter record in this household.",
+                  "evidence_task_ids": ["t1"], "selected_voter_reference": selected}
+        with patch.object(runner, "gemini_chat", side_effect=with_specialist([
+            json.dumps({"action": "delegate", "tasks": [followup.model_dump()]}),
+            json.dumps(finish),
+        ])):
+            result = runner.run_local_agent("Find total voters in the same household", "seat", "sid", voter_context=context)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["answer"], finish["answer"])
+        self.assertEqual(result["voter_context"]["selected_reference"], selected)
+        self.assertTrue(any(1 in item.get("counts", []) for item in result["diagnostics"]))
+
     def test_stale_and_cross_constituency_references_are_rejected(self):
         context = self.lookup_context()["voter_context"]
         selected = context["selected_reference"]

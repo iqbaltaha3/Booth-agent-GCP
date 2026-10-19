@@ -816,7 +816,16 @@ class Coordinator:
                     "Multiple verified voter records match this name. Ask the user to choose among the actual matching records using their available distinguishing fields; do not ask which transliteration spelling to search and do not select the first record."
                 )
             if action.selected_voter_reference:
-                if action.selected_voter_reference not in offered:
+                existing_household_anchor = (
+                    action.selected_voter_reference == self.voter_context.get("selected_reference")
+                    and action.selected_voter_reference in self.voter_context.get("references", {})
+                    and any(
+                        (self.tasks.get(result["task_id"], {}).get("voter_request") or {}).get("operation") == "household"
+                        and (self.tasks[result["task_id"]]["voter_request"] or {}).get("reference") == action.selected_voter_reference
+                        for result in supported
+                    )
+                )
+                if action.selected_voter_reference not in offered and not existing_household_anchor:
                     raise ValueError(
                         "Select a voter reference from the cited, verified lookup results"
                     )

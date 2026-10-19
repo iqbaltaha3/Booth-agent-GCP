@@ -84,7 +84,12 @@ never use row_count, a limited list, a constant, COUNT(name), or model arithmeti
 For lookup/household, execute a full-source COUNT(*) AS total separately if a total
 is needed, then your own bounded record SELECT including epic_id for references.
 Use supplied verified household house/station scope; do not retain the anchor's
-name as a household filter. Excluding an anchor must keep NULL EPIC records.
+name as a household filter. For "total voters in the same household", count all
+rows with the exact supplied house_no AND polling_station, INCLUDING the anchor.
+Do not add epic_id != anchor for a total; exclude the anchor only when
+exclude_anchor=true or the user explicitly asks for "other" voters. A count-only
+question needs COUNT(*), not a record listing. Excluding an anchor must keep NULL
+EPIC records.
 Never invent a previous person's address or identity.
 
 On finish select final evidence_source_ids, excluding exploratory samples. If
