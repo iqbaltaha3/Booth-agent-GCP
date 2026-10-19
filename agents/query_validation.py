@@ -8,8 +8,42 @@ from decimal import Decimal, InvalidOperation
 from sqlglot import parse_one, exp
 
 
+class QueryValidationError(ValueError):
+    """A generated query failed the source or population checks."""
+
+
+def literal_disjunction(node):
+    """Normalize only ORs of equalities on the same qualified column.
+
+    Do not distribute AND, fold NULL, or combine different columns/scopes.
+    """
+    def leaves(part):
+        if isinstance(part, exp.Paren):
+            return leaves(part.this)
+        if isinstance(part, exp.Or):
+            return leaves(part.this) + leaves(part.expression)
+        return [part]
+
+    column, values = None, []
+    for leaf in leaves(node):
+        if not isinstance(leaf, exp.EQ):
+            return node
+        left, right = leaf.this, leaf.expression
+        if isinstance(left, exp.Literal) and isinstance(right, exp.Column):
+            left, right = right, left
+        if not isinstance(left, exp.Column) or not isinstance(right, exp.Literal):
+            return node
+        if column is not None and left.sql(normalize=True) != column.sql(normalize=True):
+            return node
+        column = left
+        values.append(right.copy())
+    return exp.In(this=column.copy(), expressions=values)
+
+
 def canonical(expression, integer_age=False):
-    node = expression.copy()
+    node = expression.copy().transform(
+        lambda part: literal_disjunction(part) if isinstance(part, exp.Or) else part
+    )
     def clean(part):
         if isinstance(part, exp.Column):
             part.set('table', None)
@@ -19,10 +53,12 @@ def canonical(expression, integer_age=False):
             return part.this
         if integer_age and isinstance(part, exp.Cast) and isinstance(part.this, exp.Column) and part.this.name.casefold() == 'age' and part.args.get('to').sql().upper() in {'FLOAT', 'DOUBLE', 'REAL'}:
             return part.this
+        if isinstance(part, exp.In) and part.expressions and all(isinstance(value, exp.Literal) for value in part.expressions):
+            part.set('expressions', list({value.sql(): value for value in part.expressions}.values()))
         if isinstance(part, exp.In) and len(part.expressions) == 1:
             return exp.EQ(this=part.this, expression=part.expressions[0])
         if isinstance(part, exp.In) and len(part.expressions) > 1:
-            part.set('expressions', sorted(part.expressions, key=lambda value: value.sql().casefold()))
+            part.set('expressions', sorted(part.expressions, key=lambda value: value.sql()))
         if isinstance(part, exp.Literal) and not part.is_string:
             try:
                 return exp.Literal.number(format(Decimal(part.this).normalize(), 'f'))
@@ -53,33 +89,33 @@ def literal_filters(conn, where, params):
 def check_query(sql, task, conn, runner, compiled_filters=None):
     tree = parse_one(sql, read='sqlite')
     if not isinstance(tree, (exp.Select, exp.Union, exp.Intersect, exp.Except)):
-        raise ValueError('Only analytical SELECT queries are supported')
+        raise QueryValidationError('Only analytical SELECT queries are supported')
     allowed = {name.casefold() for name in runner.gcs_data.list_tables(conn)} | {'sqlite_master'}
     ctes = {cte.alias_or_name.casefold() for cte in tree.find_all(exp.CTE)}
     tables = list(tree.find_all(exp.Table))
     for table in tables:
         if table.catalog or table.db or table.name.casefold() not in allowed | ctes:
-            raise ValueError('Query must use tables in the selected constituency source only')
+            raise QueryValidationError('Query must use tables in the selected constituency source only')
     request = task.history_request
     if request and request.operation != 'coverage':
         if not any(re.fullmatch(r'form20_\d{4}_(lok|vidhan)', table.name, re.I) for table in tables):
-            raise ValueError('Election-result evidence must read the requested Form-20 source, not return invented constants')
+            raise QueryValidationError('Election-result evidence must read the requested Form-20 source, not return invented constants')
         for table in tables:
             match = re.fullmatch(r'form20_(\d{4})_(lok|vidhan)', table.name, re.I)
             if match and ((request.year and int(match[1]) != request.year) or
                           (request.election_type and match[2] != request.election_type)):
-                raise ValueError('Query uses the wrong election year or type for history_request')
+                raise QueryValidationError('Query uses the wrong election year or type for history_request')
     request = task.voter_request
     if request and not any(t.name.casefold() == 'voters' for t in tables):
-        raise ValueError('Voter evidence must read the voters source, not return invented constants')
+        raise QueryValidationError('Voter evidence must read the voters source, not return invented constants')
     if request and request.group_by:
         grouped = {column.name.casefold() for group in tree.find_all(exp.Group) for column in group.find_all(exp.Column)}
         if not set(request.group_by) <= grouped:
-            raise ValueError('SQL must preserve all requested grouping fields')
+            raise QueryValidationError('SQL must preserve all requested grouping fields')
     if request and (compiled_filters is not None or request.filters or request.booth or request.any_of):
         from agents.voter import compile_filters
         if compiled_filters is None and request.booth:
-            raise ValueError('Booth-scoped analysis requires the Voter-resolved station filter')
+            raise QueryValidationError('Booth-scoped analysis requires the Voter-resolved station filter')
         where, params, _ = compiled_filters if compiled_filters is not None else compile_filters(conn, request.filters, runner)
         literal_where = literal_filters(conn, where, params)
         integer_age = any(row[1].casefold() == 'age' and 'INT' in row[2].upper() for row in conn.execute('PRAGMA table_info(voters)'))
@@ -95,7 +131,7 @@ def check_query(sql, task, conn, runner, compiled_filters=None):
             if present == {'1 = 1'}:
                 present = set()
             if required != present:
-                raise ValueError('SQL must retain every resolved voter filter, without extra population restrictions, as mandatory conjunctions on each base voter scan. Use exact stored labels and a filtered base CTE; do not hide filters in OR branches.')
+                raise QueryValidationError('SQL must retain every resolved voter filter, without extra population restrictions, as mandatory conjunctions on each base voter scan. Use exact stored labels and a filtered base CTE; do not hide filters in OR branches.')
     return tree
 
 

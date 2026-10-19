@@ -175,7 +175,7 @@ class SpecialistResult(Contract):
     missing_inputs: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
-    failure_code: Literal["unsupported_scope", "configuration_missing", "provider_unavailable", "provider_capacity", "provider_request_invalid", "deadline_exceeded", "data_unavailable"] | None = None
+    failure_code: Literal["unsupported_scope", "configuration_missing", "provider_unavailable", "provider_capacity", "provider_request_invalid", "deadline_exceeded", "data_unavailable", "query_validation_failed"] | None = None
 
 
 class ResolvedFilter(VoterFilter):

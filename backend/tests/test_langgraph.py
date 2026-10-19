@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from agents import execution, local_runner as runner
 from agents.contracts import SpecialistResult
-from agents.runtime import build_graph
+from agents.runtime import build_graph, Coordinator
 from app.auth import get_current_user
 from app.config import get_settings
 from fastapi import HTTPException
@@ -133,6 +133,30 @@ class GraphTests(unittest.TestCase):
         self.assertEqual([r["answer"] for r in results], ["Hello Alice", "Hello Bob"])
         self.assertEqual([r["session_id"] for r in results], ["Alice", "Bob"])
         self.assertNotEqual(results[0]["request_id"], results[1]["request_id"])
+
+    def test_fallback_reports_cause_and_request_id_without_raw_errors(self):
+        from types import SimpleNamespace
+        for terminal, code, phrase in [
+            ('turn_limit', 'query_validation_failed', 'requested filters and source'),
+            ('turn_limit', 'data_unavailable', 'records needed'),
+            ('deadline_exceeded', None, 'time limit'),
+            ('repeated_invalid_action', None, 'repeatedly'),
+            ('turn_limit', None, 'step limit'),
+        ]:
+            with self.subTest(terminal=terminal, code=code):
+                context = Coordinator({
+                    'results': {'v': {'status': 'failed', 'failure_code': code,
+                                     'facts': [], 'errors': ['private SQL detail']} } if code else {},
+                    'requirements': SimpleNamespace(intent='other'),
+                    'terminal': terminal, 'question': 'Describe records',
+                    'request_id': 'test-request',
+                }, runner)
+                context.response = lambda answer, status: {'answer': answer, 'status': status}
+                result = context.fallback()
+                self.assertIn(phrase, result['answer'])
+                self.assertIn('test-request', result['answer'])
+                self.assertNotIn('private SQL detail', result['answer'])
+                self.assertEqual(result['status'], 'failed')
 
     def test_authentication_is_required_independently_of_graph_runtime(self):
         with patch.object(get_settings(), "local_dev_auth", False):

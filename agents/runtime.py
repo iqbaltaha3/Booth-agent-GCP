@@ -23,6 +23,7 @@ from agents.contracts import (
     VoterFilter,
 )
 from agents import execution
+from agents.query_validation import QueryValidationError
 from agents.source_catalog import (
     voter_catalog,
     validate_demographic_intent,
@@ -120,6 +121,7 @@ def sql_specialist(task, slug, meta, runner, question=""):
             for _ in range(5 if task.agent == "voter" else 6):
                 if execution.remaining(reserve=15) <= 0:
                     result.errors.append("deadline_exceeded")
+                    result.failure_code = "deadline_exceeded"
                     break
                 conn.set_progress_handler(lambda: int(execution.remaining(reserve=15) <= 0), 10000)
                 raw = runner.gemini_chat([
@@ -181,11 +183,13 @@ def sql_specialist(task, slug, meta, runner, question=""):
                     result.sources.append({"source_id": source_id, "database": filename, "sql": action.sql})
                     result.facts.append({"source_id": source_id, **observation})
                     memory.append({"sql": action.sql, "result": observation})
+                    result.failure_code = None
                     if observation["truncated"]:
                         result.limitations.append(f"{source_id}: rows truncated to 80; use aggregation for totals.")
                 except Exception as error:
                     # Corrections consume the same bounded specialist budget.
                     memory.append({"error": str(error)})
+                    result.failure_code = "query_validation_failed" if isinstance(error, QueryValidationError) else None
                     if str(error) == last_correction:
                         break
                     last_correction = str(error)
@@ -1217,8 +1221,13 @@ class Coordinator:
                 user_error(self.terminal, self.runner.wants_hindi(self.question)),
                 "failed",
             )
-        if self.terminal == "deadline_exceeded":
+        codes = {r.get("failure_code") for r in self.results.values()}
+        if self.terminal == "deadline_exceeded" or "deadline_exceeded" in codes:
+            self.terminal = "deadline_exceeded"
             answer = "The request reached its time limit before a verified answer was ready. Please retry."
+        elif "query_validation_failed" in codes:
+            self.terminal = "query_validation_failed"
+            answer = "I could not validate the generated query against the requested filters and source. No complete answer was verified."
         elif self.results and all(
             (r["status"] == "failed" for r in self.results.values())
         ):
@@ -1253,13 +1262,24 @@ class Coordinator:
                 answer = "The records needed for this request are currently unavailable for the selected constituency."
                 self.terminal = "data_unavailable"
             else:
-                answer = "I could not retrieve the information needed for this request. The source or service may be unavailable; please retry."
+                answer = "The analysis attempts ended without verified query results. Please retry; the request ID can be used to investigate this failure."
         elif self.results:
-            answer = "I retrieved some information, but could not verify all the comparisons or details you requested. I cannot provide a complete answer from this attempt."
+            answer = ("The generated answer repeatedly failed verification against the available evidence."
+                      if self.terminal == "repeated_invalid_action" else
+                      "The analysis reached its step limit before a complete answer could be verified.")
         else:
-            answer = "The AI service could not produce a valid answer for this request. Please retry."
+            answer = ("The AI service repeatedly generated an invalid action and could not complete this request."
+                      if self.terminal == "repeated_invalid_action" else
+                      "The analysis reached its step limit without producing verified results.")
         if self.runner.wants_hindi(self.question):
-            answer = "इस प्रयास में आपके प्रश्न का सत्यापित उत्तर पूरा नहीं हो पाया। कृपया दोबारा प्रयास करें।"
+            answer = {
+                "query_validation_failed": "तैयार की गई क्वेरी का अनुरोधित फ़िल्टर और स्रोत से मिलान सत्यापित नहीं हो पाया। पूरा उत्तर सत्यापित नहीं हुआ।",
+                "deadline_exceeded": "सत्यापित उत्तर तैयार होने से पहले समय सीमा समाप्त हो गई। कृपया दोबारा प्रयास करें।",
+                "repeated_invalid_action": "तैयार किए गए उत्तर या कार्रवाई का बार-बार सत्यापन विफल हुआ।",
+                "turn_limit": "पूरा उत्तर सत्यापित होने से पहले विश्लेषण की चरण सीमा समाप्त हो गई।",
+                "data_unavailable": "चुने गए निर्वाचन क्षेत्र के लिए आवश्यक रिकॉर्ड अभी उपलब्ध नहीं हैं।",
+            }.get(self.terminal, "इस प्रयास में आपके प्रश्न का सत्यापित उत्तर पूरा नहीं हो पाया। कृपया दोबारा प्रयास करें।")
+        answer += "\n" + ("अनुरोध ID: " if self.runner.wants_hindi(self.question) else "Request ID: ") + self.request_id
         return self.response(
             answer,
             "partial"

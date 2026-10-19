@@ -1,5 +1,4 @@
 """Meaning/operation checks using fictional roll records, never production PII."""
-import copy
 import json
 import sqlite3
 import tempfile
@@ -214,6 +213,55 @@ class VoterHarnessTests(unittest.TestCase):
             for sql in ["SELECT gender,COUNT(*) FROM voters GROUP BY gender", "SELECT COUNT(*) FROM voters WHERE religion='Muslim' OR gender='Male'", "SELECT COUNT(*) FROM voters WHERE religion='muslim'", "SELECT COUNT(*) FROM voters WHERE religion='Muslim' AND gender='Male'"]:
                 with self.assertRaisesRegex(ValueError,'retain every'):
                     check_query(sql,assignment,c,runner)
+
+    def test_equivalent_religion_disjunction_preserves_region_and_counts(self):
+        assignment = task({'operation': 'compare', 'filters': [
+            {'field': 'region', 'value': 'East'},
+            {'field': 'religion', 'operator': 'in', 'values': ['Hindu', 'Muslim']}],
+            'group_by': ['religion']})
+        with closing(data.open_sqlite('seat', 'voters.db')) as c:
+            expected = [('Hindu', 1), ('Muslim', 2)]
+            for predicate in [
+                "religion IN ('Hindu','Muslim')",
+                "(religion='Hindu' OR religion='Muslim')",
+                "(('Muslim'=religion OR religion='Hindu') OR religion='Muslim')",
+            ]:
+                sql = "SELECT religion,COUNT(*) FROM voters WHERE region='East' AND " + predicate + " GROUP BY religion ORDER BY religion"
+                check_query(sql, assignment, c, runner)
+                self.assertEqual([tuple(row) for row in c.execute(sql)], expected)
+            for predicate in [
+                "region='East' OR religion IN ('Hindu','Muslim')",
+                "region='East' AND (religion='Hindu' OR gender='Male')",
+                "region='East' AND (religion='Hindu' OR religion='Muslim' OR religion='Other')",
+                "region='East' AND religion='Hindu'",
+                "region='East' AND (religion='hindu' OR religion='Muslim')",
+                "region='East' AND (religion='Hindu' OR religion IS NULL)",
+                "region='East' AND (religion='Hindu' OR religion='Muslim') AND gender='Male'",
+            ]:
+                with self.subTest(predicate=predicate), self.assertRaisesRegex(ValueError, 'retain every'):
+                    check_query('SELECT religion,COUNT(*) FROM voters WHERE ' + predicate + ' GROUP BY religion', assignment, c, runner)
+
+    def test_query_rejection_retains_failure_code(self):
+        assignment = task({'operation': 'count', 'filters': [{'field': 'region', 'value': 'East'}]})
+        with patch.object(runner, 'gemini_chat', return_value=json.dumps({
+            'action': 'sql', 'sql': 'SELECT COUNT(*) AS total FROM voters'})):
+            result = run_specialist(assignment, 'seat', {}, runner, {})
+        self.assertEqual(result.status, 'failed')
+        self.assertEqual(result.failure_code, 'query_validation_failed')
+        self.assertEqual(result.facts, [])
+
+    def test_successful_repair_clears_query_failure(self):
+        assignment = task({'operation': 'count', 'filters': [{'field': 'region', 'value': 'East'}]})
+        replies = [
+            {'action': 'sql', 'sql': 'SELECT COUNT(*) AS total FROM voters'},
+            {'action': 'sql', 'sql': "SELECT COUNT(*) AS total FROM voters WHERE region='East'"},
+            {'action': 'finish', 'status': 'complete'},
+        ]
+        with patch.object(runner, 'gemini_chat', side_effect=[json.dumps(reply) for reply in replies]):
+            result = run_specialist(assignment, 'seat', {}, runner, {})
+        self.assertEqual(result.status, 'complete')
+        self.assertIsNone(result.failure_code)
+        self.assertEqual(result.facts[0]['total'], 3)
 
     def test_wrong_election_type_is_rejected(self):
         assignment=SpecialistTask(task_id='h',agent='history',objective='2024 results',required_outputs=['leader'],acceptance_criteria=['2024 Lok Sabha'],history_request={'operation':'winner','year':2024,'election_type':'lok'})
