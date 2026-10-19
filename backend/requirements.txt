@@ -13,3 +13,4 @@ google-cloud-aiplatform>=1.60.0
 # Constituency configuration read by the bundled agent runner
 PyYAML>=6.0
 python-multipart>=0.0.9
+sqlglot==27.29.0

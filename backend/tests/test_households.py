@@ -1,3 +1,4 @@
+from backend.tests.sql_model_fixture import with_specialist
 """Synthetic follow-up conversations, household matching and shared session checks."""
 
 import copy
@@ -81,10 +82,10 @@ class HouseholdTests(unittest.TestCase):
 
     def lookup_context(self):
         lookup = assignment(name_query={"operation": "lookup", "person": "ताहा इकबाल"})
-        with patch.object(runner, "gemini_chat", side_effect=[
+        with patch.object(runner, "gemini_chat", side_effect=with_specialist([
             json.dumps({"action": "delegate", "tasks": [lookup.model_dump()]}),
             '{"action":"finish","answer":"Found the requested voter.","evidence_task_ids":["t1"]}',
-        ]):
+        ])):
             return runner.run_local_agent("Show details of the person", "seat", "sid")
 
     def test_completed_lookup_retains_reference_and_next_turn_resolves_household(self):
@@ -94,15 +95,15 @@ class HouseholdTests(unittest.TestCase):
         selected = context["selected_reference"]
         self.assertEqual(context["references"][selected]["epic_id"], "TEST-1")
         followup = assignment(household_query={"reference": selected})
-        with patch.object(runner, "gemini_chat", side_effect=[
+        with patch.object(runner, "gemini_chat", side_effect=with_specialist([
             json.dumps({"action": "delegate", "tasks": [followup.model_dump()]}),
             '{"action":"finish","answer":"Two matching voter records.","evidence_task_ids":["t1"]}',
-        ]) as model:
+        ])) as model:
             second = runner.run_local_agent("Find people in the same house", "seat", "sid", voter_context=context)
         self.assertEqual(second["status"], "complete")
         self.assertEqual(second["voter_context"]["selected_reference"], selected)
         self.assertIn('"total": 2', model.call_args.args[0][1]["content"])
-        self.assertEqual(second["diagnostics"][0]["operation"], "household_lookup")
+        self.assertTrue(any(item.get("operation") == "household_lookup" for item in second["diagnostics"]))
 
     def test_stale_and_cross_constituency_references_are_rejected(self):
         context = self.lookup_context()["voter_context"]
@@ -120,8 +121,8 @@ class HouseholdTests(unittest.TestCase):
     def test_multi_person_result_never_selects_first_voter(self):
         query = assignment(name_query={"operation": "lookup", "person": "अन्य", "relative": "", "match_mode": "substring"})
         query.name_query.person = "अलग"
-        with patch.object(runner, "gemini_chat", side_effect=[json.dumps({"action": "delegate", "tasks": [query.model_dump()]}),
-                         '{"action":"finish","answer":"Two people match.","evidence_task_ids":["t1"]}']):
+        with patch.object(runner, "gemini_chat", side_effect=with_specialist([json.dumps({"action": "delegate", "tasks": [query.model_dump()]}),
+                         '{"action":"finish","answer":"Two people match.","evidence_task_ids":["t1"]}'])):
             result = runner.run_local_agent("Find matching people", "seat")
         self.assertEqual(len(result["voter_context"]["references"]), 2)
         self.assertIsNone(result["voter_context"]["selected_reference"])

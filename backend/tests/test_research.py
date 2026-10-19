@@ -41,9 +41,9 @@ class ResearchTests(unittest.TestCase):
 
     def model(self, messages, **kwargs):
         system = messages[0]["content"]
-        if '"title": "SearchPlan"' in system:
+        if kwargs.get("response_schema", {}).get("title") == "SearchPlan":
             return '{"queries":["Prayagraj water notice","प्रयागराज पानी सूचना"]}'
-        if '"title": "Ranking"' in system:
+        if kwargs.get("response_schema", {}).get("title") == "Ranking":
             return '{"ranking":[{"index":0,"score":90}]}'
         context = json.loads(messages[1]["content"])
         source_id = context["evidence"][0]["source_id"]
@@ -65,6 +65,12 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(len(searches), 4)
         self.assertTrue(all("start_date" in p and "end_date" in p for p in searches))
         self.assertNotIn("page_text", result.sources[0])
+
+    def test_general_qualifications_do_not_force_partial_when_scope_is_met(self):
+        result = self.execute(task(scope="district"))
+        self.assertEqual(result.status, "complete")
+        self.assertTrue(result.limitations)
+        self.assertFalse(result.gaps)
 
     def test_historical_research_does_not_add_news_window(self):
         self.execute(task(time_sensitive=False, public_question="What historical demographic tables describe Prayagraj in 2011?"))
@@ -124,7 +130,7 @@ class ResearchTests(unittest.TestCase):
 
     def test_invalid_ranking_indices_are_ignored(self):
         def model(messages, **kwargs):
-            if '"title": "Ranking"' in messages[0]["content"]:
+            if kwargs.get("response_schema", {}).get("title") == "Ranking":
                 return '{"ranking":[{"index":999,"score":100},{"index":0,"score":90},{"index":0,"score":80}]}'
             return self.model(messages, **kwargs)
         result = self.execute(model=model)

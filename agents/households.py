@@ -42,8 +42,11 @@ def remember_voters(result, slug, data, context):
         return
     version = data_version(slug, data)
     if context.get("data_version") != version:
+        population = context.get("population")
         context.clear()
         context.update({"data_version": version, "references": {}, "selected_reference": None})
+        if population and population.get("data_version") == version:
+            context["population"] = population
     references = context.setdefault("references", {})
     with closing(data.open_sqlite(slug, "voters.db")) as conn:
         verified = []
@@ -96,13 +99,13 @@ def household_lookup(task, slug, data, context):
                 house, station = anchor["house_no"], anchor["polling_station"]
             else:
                 house = query.house_no.strip()
-                stations = [row[0] for row in conn.execute("SELECT DISTINCT polling_station FROM voters")
-                            if normalized_station(row[0]) == normalized_station(query.polling_station)]
-                if len(stations) != 1:
+                from agents.station_matching import resolve_roll_station, AmbiguousInput
+                try:
+                    station = resolve_roll_station(query.polling_station, conn)
+                except AmbiguousInput as error:
                     result.status = "needs_clarification"
-                    result.missing_inputs = ["Please confirm the exact polling station; the supplied station does not resolve uniquely."]
+                    result.missing_inputs = [str(error)]
                     return result
-                station = stations[0]
             if not str(house or "").strip() or not str(station or "").strip():
                 raise ValueError("The voter does not have a usable house and polling station")
             # Preserve house punctuation. Never broaden to the entire constituency.

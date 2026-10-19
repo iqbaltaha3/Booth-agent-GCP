@@ -72,7 +72,7 @@ class BackendTests(unittest.TestCase):
 
         client = Mock()
 
-        def download(filename):
+        def download(filename, **kwargs):
             Path(filename).write_text("fixture")
 
         client.bucket.return_value.blob.return_value.download_to_filename.side_effect = download
@@ -195,6 +195,15 @@ class BackendTests(unittest.TestCase):
             response = self.client.post("/agent/chat", json={"question": "Same house", "constituency_id": "seat"})
         self.assertEqual(response.status_code, 503)
         runtime.assert_not_called()
+
+    def test_partial_explanation_survives_chat_and_history(self):
+        explanation = "Booth results are available, but their region mapping could not be verified."
+        with patch("app.routes.chat.run_chat", return_value={"answer": "Available booth results.", "status": "partial", "partial_reason": explanation}):
+            result = self.client.post("/agent/chat", json={"question": "Top regions?", "constituency_id": "seat", "session_id": "partial-sid"})
+        self.assertEqual(result.json()["partial_reason"], explanation)
+        history = self.client.get("/agent/sessions/partial-sid/history").json()
+        self.assertEqual(history["turns"][-1]["partial_reason"], explanation)
+        self.assertEqual(history["turns"][-1]["status"], "partial")
 
     def test_web_sources_survive_chat_and_history_without_extracted_content(self):
         source = {"source_id": "R123456789abc", "title": "Fictional public notice", "url": "https://example.com/notice",

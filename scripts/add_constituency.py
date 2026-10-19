@@ -58,8 +58,6 @@ def copy_artifacts(src: Path, dest: Path) -> int:
         die(f"missing required folder: {src_booth}")
 
     json_files = sorted(src_booth.glob("*.json"))
-    if not json_files:
-        die(f"no JSON files found in {src_booth}")
 
     if src.resolve() == dest.resolve():
         return len(json_files)
@@ -169,6 +167,10 @@ def main() -> int:
         product_tagline = f"Booth-level electoral intelligence for {name}"
 
     count = copy_artifacts(artifact_root, local_dest)
+    if (artifact_root / "coverage.json").is_file():
+        shutil.copy2(artifact_root / "coverage.json", local_dest / "coverage.json")
+    elif (local_dest / "coverage.json").exists():
+        (local_dest / "coverage.json").unlink()
     write_constituency_yaml(
         yaml_path,
         slug,

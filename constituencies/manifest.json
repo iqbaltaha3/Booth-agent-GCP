@@ -27,6 +27,24 @@
     "product_tagline": "Booth-level electoral intelligence for Allahabad-west"
   },
   {
+    "slug": "bara",
+    "name": "Bara",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Prayagraj",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Bara"
+  },
+  {
+    "slug": "chail",
+    "name": "Chail",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Kaushambi",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Chail"
+  },
+  {
     "slug": "gyanpur",
     "name": "Gyanpur",
     "seat_type": "Vidhan Sabha (Assembly)",
@@ -34,6 +52,42 @@
     "state": "Uttar Pradesh",
     "product_name": "Arjun",
     "product_tagline": "Booth-level electoral intelligence for Gyanpur Vidhan Sabha"
+  },
+  {
+    "slug": "handia",
+    "name": "Handia",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Prayagraj",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Handia"
+  },
+  {
+    "slug": "karchana",
+    "name": "Karchana",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Prayagraj",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Karchana"
+  },
+  {
+    "slug": "koraon",
+    "name": "Koraon",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Prayagraj",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Koraon"
+  },
+  {
+    "slug": "manjhanpur",
+    "name": "Manjhanpur",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Kaushambi",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Manjhanpur"
   },
   {
     "slug": "meja",
@@ -45,6 +99,15 @@
     "product_tagline": "Booth-level electoral intelligence for Meja"
   },
   {
+    "slug": "phaphamau",
+    "name": "Phaphamau",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Prayagraj",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Phaphamau"
+  },
+  {
     "slug": "phulpur",
     "name": "Phulpur",
     "seat_type": "Vidhan Sabha (Assembly)",
@@ -52,5 +115,32 @@
     "state": "Uttar Pradesh",
     "product_name": "Arjun",
     "product_tagline": "Booth-level electoral intelligence for Phulpur"
+  },
+  {
+    "slug": "pratappur",
+    "name": "Pratappur",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Prayagraj",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Pratappur"
+  },
+  {
+    "slug": "sirathu",
+    "name": "Sirathu",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Kaushambi",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Sirathu"
+  },
+  {
+    "slug": "soraon",
+    "name": "Soraon",
+    "seat_type": "Vidhan Sabha (Assembly)",
+    "district": "Prayagraj",
+    "state": "Uttar Pradesh",
+    "product_name": "Arjun",
+    "product_tagline": "Booth-level electoral intelligence for Soraon"
   }
 ]

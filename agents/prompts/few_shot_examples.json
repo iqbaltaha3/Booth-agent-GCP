@@ -1,0 +1,813 @@
+{
+  "coordinator_system.txt": [
+    {
+      "input": {
+        "question": "In XYZ school find Taha Iqbal",
+        "specialist_observation": {
+          "status": "needs_clarification",
+          "missing_inputs": ["Please choose the polling station: 1. XYZ Primary School Room 1 — Part_125; 2. XYZ Primary School Room 2 — Part_126"]
+        }
+      },
+      "output": {
+        "action": "clarify",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "answer": "Which polling station should I search for Taha Iqbal in? 1. XYZ Primary School, Room 1 — Part 125. 2. XYZ Primary School, Room 2 — Part 126."
+      }
+    },
+    {
+      "input": {
+        "question": "second one",
+        "pending_objective": "Find Taha Iqbal in XYZ school",
+        "last_offered_choices": ["XYZ Primary School Room 1 — Part_125", "XYZ Primary School Room 2 — Part_126"],
+        "pending_task_id": "v1"
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "v1",
+            "agent": "voter",
+            "objective": "Find Taha Iqbal in the user's selected polling station, Part 126.",
+            "required_outputs": ["Matching voter records"],
+            "acceptance_criteria": ["Preserve the requested name and restrict the search to Part 126"],
+            "voter_request": {"operation": "lookup", "person": "Taha Iqbal", "booth": "Part 126", "population_mode": "new"}
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "How many Muslim voters?"
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "voter",
+            "objective": "Count voters recorded with the requested religion in the selected constituency.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "voter_request": {
+              "operation": "count",
+              "population_mode": "new",
+              "filters": [
+                {
+                  "field": "religion",
+                  "operator": "eq",
+                  "value": "Muslim"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "How many women among them?",
+        "verified_population": {
+          "filters": [
+            {
+              "field": "religion",
+              "operator": "eq",
+              "value": "Muslim"
+            }
+          ]
+        }
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "voter",
+            "objective": "Count women within the verified previous population.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "voter_request": {
+              "operation": "count",
+              "population_mode": "refine",
+              "filters": [
+                {
+                  "field": "gender",
+                  "operator": "eq",
+                  "value": "Female"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "Total voters in the constituency",
+        "verified_population": {
+          "filters": [
+            {
+              "field": "religion",
+              "operator": "eq",
+              "value": "Muslim"
+            },
+            {
+              "field": "gender",
+              "operator": "eq",
+              "value": "Female"
+            }
+          ]
+        }
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "voter",
+            "objective": "Count all available roll records; do not retain previous demographic filters.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "voter_request": {
+              "operation": "count",
+              "population_mode": "new",
+              "filters": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "Find Shyam in booth 25"
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "voter",
+            "objective": "Find matching roll records for the named person within booth 25.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "voter_request": {
+              "operation": "lookup",
+              "person": "Shyam",
+              "booth": "25"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "What is his house number?",
+        "verified_voter_context": {
+          "selected_reference": "verified-test-ref",
+          "references": {
+            "verified-test-ref": {
+              "epic_id": "TEST0001",
+              "name": "Fictional person"
+            }
+          }
+        }
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "voter",
+            "objective": "Read the stored house number of the verified selected voter.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "voter_request": {
+              "operation": "lookup",
+              "reference": "verified-test-ref"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "Who else is in the same house?",
+        "verified_voter_context": {
+          "selected_reference": "verified-test-ref"
+        }
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "voter",
+            "objective": "Find other roll records at the selected verified voter address.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "voter_request": {
+              "operation": "household",
+              "reference": "verified-test-ref",
+              "exclude_anchor": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "Give me booth 25 profile"
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "portfolio",
+            "objective": "Retrieve the prepared booth profile and explain its relevant measures.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "booth_analysis_request": {
+              "booth": "25"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "How many voters in booth 25 are over 60?"
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "voter",
+            "objective": "Count roll records aged over 60 in booth 25.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "voter_request": {
+              "operation": "count",
+              "booth": "25",
+              "filters": [
+                {
+                  "field": "age",
+                  "operator": "gt",
+                  "value": "60"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "In 2024",
+        "earlier_request": "Who won this seat?",
+        "election_catalog": [
+          {
+            "year": 2024,
+            "election_type": "lok",
+            "row_count": 20
+          }
+        ]
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "history",
+            "objective": "Retrieve the 2024 Lok Sabha leader and margin within the selected assembly segment.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "history_request": {
+              "operation": "winner",
+              "year": 2024,
+              "election_type": "lok",
+              "geography": "constituency"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "Top 5 regions where Party A led by vote share in 2024"
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "answer_requirements": {
+          "intent": "election_ranking",
+          "year": 2024,
+          "election_type": "lok",
+          "geography": "region",
+          "metric": "vote_share",
+          "party": "Party A",
+          "limit": 5
+        },
+        "tasks": [
+          {
+            "task_id": "rank1",
+            "agent": "history",
+            "objective": "Rank the requested regions by Party A vote share in 2024 Lok Sabha using verified region mappings.",
+            "history_request": {
+              "operation": "rank",
+              "year": 2024,
+              "election_type": "lok",
+              "geography": "region"
+            },
+            "required_outputs": [
+              "geography_name,party_votes,opponent_name,opponent_votes,margin,total_valid_votes,vote_share"
+            ],
+            "acceptance_criteria": [
+              "Preserve geography/year; descending vote share; explain unavailable region mapping"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "How many election years have data?"
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "history",
+            "objective": "Count nonempty election periods, list their years/types and identify empty tables.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "history_request": {
+              "operation": "coverage"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "Latest road-work news here"
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "tasks": [
+          {
+            "task_id": "t1",
+            "agent": "research",
+            "objective": "Find current public reporting and official announcements with read sources.",
+            "required_outputs": [
+              "Requested result and scope"
+            ],
+            "acceptance_criteria": [
+              "Match the requested population and operation"
+            ],
+            "research_query": {
+              "public_question": "Recent public road-work announcements in the selected public constituency",
+              "scope": "constituency",
+              "time_mode": "recent"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "Who are you?"
+      },
+      "output": {
+        "action": "finish",
+        "answer_kind": "conversation",
+        "objective_mode": "continue",
+        "answer": "I'm Arjun, your AI booth agent. I can help you understand voter records, booth reports, election results and public information.",
+        "status": "complete"
+      }
+    },
+    {
+      "input": {
+        "question": "How many voters are recorded as Category A?",
+        "observations": {
+          "t1": {
+            "operation": "count",
+            "validated_count": true,
+            "total": 120,
+            "filters": [
+              {
+                "field": "religion",
+                "value": "Category A"
+              }
+            ]
+          }
+        }
+      },
+      "output": {
+        "action": "finish",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "answer": "There are 120 voters recorded as Category A in the available roll for this constituency.",
+        "evidence_task_ids": [
+          "t1"
+        ],
+        "status": "complete"
+      }
+    },
+    {
+      "input": {
+        "question": "How many Category Z voters?",
+        "observations": {
+          "t1": {
+            "status": "needs_clarification",
+            "missing_inputs": [
+              "Category Z does not resolve to a recorded religion label."
+            ]
+          }
+        }
+      },
+      "output": {
+        "action": "clarify",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "answer": "Which recorded religion category do you mean by Category Z?"
+      }
+    },
+    {
+      "input": {
+        "question": "Explain the historical background of this constituency"
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "answer_requirements": {
+          "intent": "public_history"
+        },
+        "tasks": [
+          {
+            "task_id": "background",
+            "agent": "research",
+            "objective": "Research the public historical background of the selected constituency.",
+            "research_query": {
+              "public_question": "Historical background of the selected public constituency",
+              "scope": "constituency",
+              "time_mode": "historical"
+            },
+            "required_outputs": [
+              "Historical background with sources"
+            ],
+            "acceptance_criteria": [
+              "Preserve geography and data years; use read sources"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "How did Party A perform in previous elections?"
+      },
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "answer_requirements": {
+          "intent": "electoral_history"
+        },
+        "tasks": [
+          {
+            "task_id": "elections",
+            "agent": "history",
+            "objective": "Compare Party A vote totals across available nonempty election periods.",
+            "history_request": {
+              "operation": "compare"
+            },
+            "required_outputs": [
+              "Year,type,party totals and source scope"
+            ],
+            "acceptance_criteria": [
+              "Discover labels and nonempty periods; distinguish segment scope"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "What is her house number?",
+        "observations": {
+          "_verified_person": {
+            "agent": "voter",
+            "status": "complete",
+            "facts": [
+              {
+                "operation": "lookup",
+                "records": [
+                  {
+                    "name": "Fictional person",
+                    "house_no": "7",
+                    "epic_id": "TEST7"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "output": {
+        "action": "finish",
+        "answer_kind": "data",
+        "objective_mode": "continue",
+        "answer": "Her recorded house number is 7.",
+        "evidence_task_ids": [
+          "_verified_person"
+        ],
+        "status": "complete"
+      }
+    }
+  ],
+  "voter_agent_system.txt": [
+    {
+      "input": {
+        "task": "Group the verified Category A population by gender",
+        "stored_labels": {
+          "religion": [
+            "Category A",
+            "Category B"
+          ]
+        }
+      },
+      "output": {
+        "action": "sql",
+        "sql": "SELECT gender,COUNT(*) AS total FROM voters WHERE religion='Category A' GROUP BY gender ORDER BY total DESC"
+      }
+    },
+    {
+      "input": {
+        "task": "Find the largest age groups among voters over 60"
+      },
+      "output": {
+        "action": "sql",
+        "sql": "SELECT age,COUNT(*) AS total FROM voters WHERE age>60 GROUP BY age ORDER BY total DESC LIMIT 10"
+      }
+    },
+    {
+      "input": {
+        "task": "Count records with an unknown religion category",
+        "stored_labels": [
+          "Category A",
+          "Category B"
+        ]
+      },
+      "output": {
+        "action": "clarify",
+        "missing_inputs": [
+          "The requested category could not be resolved to a stored label."
+        ]
+      }
+    },
+    {
+      "input": {
+        "observations": [
+          {
+            "source_id": "t1:q1",
+            "columns": [
+              "gender",
+              "total"
+            ],
+            "rows": [
+              [
+                "Female",
+                70
+              ],
+              [
+                "Male",
+                50
+              ]
+            ],
+            "truncated": false
+          }
+        ]
+      },
+      "output": {
+        "action": "finish",
+        "status": "complete",
+        "evidence_source_ids": [
+          "t1:q1"
+        ]
+      }
+    }
+  ],
+  "history_agent_system.txt": [
+    {
+      "input": {
+        "task": "Which periods have result records?",
+        "tables": [
+          "form20_2022_vidhan",
+          "form20_2024_lok"
+        ]
+      },
+      "output": {
+        "action": "sql",
+        "sql": "SELECT 2022 AS year,'vidhan' AS election_type,COUNT(*) AS records FROM form20_2022_vidhan UNION ALL SELECT 2024,'lok',COUNT(*) FROM form20_2024_lok"
+      }
+    },
+    {
+      "input": {
+        "task": "Leading candidates and margin in the selected 2024 Lok Sabha assembly segment"
+      },
+      "output": {
+        "action": "sql",
+        "sql": "SELECT candidate,party,SUM(votes) AS total_votes FROM form20_2024_lok WHERE UPPER(COALESCE(party,''))!='META' AND UPPER(candidate) NOT IN ('TOTAL','NOTA','TENDERED') GROUP BY candidate,party ORDER BY total_votes DESC,candidate LIMIT 2"
+      }
+    },
+    {
+      "input": {
+        "task": "Regional ranking",
+        "observations": [
+          {
+            "area_mapping": "unavailable",
+            "rows": []
+          }
+        ]
+      },
+      "output": {
+        "action": "finish",
+        "status": "partial",
+        "gaps": [
+          "The requested region mapping is unavailable; a booth list cannot satisfy a region ranking."
+        ]
+      }
+    }
+  ],
+  "internet_SearchPlan": [
+    {
+      "input": {
+        "question": "Historical background of Test Town",
+        "time_sensitive": false
+      },
+      "output": {
+        "queries": [
+          "Test Town official district gazetteer history",
+          "Test Town historical records official archive"
+        ]
+      }
+    },
+    {
+      "input": {
+        "question": "Recent public road notices in Test District",
+        "time_sensitive": true,
+        "start_date": "2026-10-01",
+        "end_date": "2026-10-18"
+      },
+      "output": {
+        "queries": [
+          "Test District official road notices October 2026",
+          "Test District road work news October 2026"
+        ]
+      }
+    }
+  ],
+  "internet_Findings": [
+    {
+      "input": {
+        "evidence": [
+          {
+            "source_id": "Rtest",
+            "read_status": "page_read",
+            "page_text": "Fictional district notice: road maintenance was announced. No constituency boundary stated."
+          }
+        ]
+      },
+      "output": {
+        "findings": [
+          {
+            "text": "A district notice announced road maintenance; constituency coverage was not established.",
+            "source_ids": [
+              "Rtest"
+            ],
+            "kind": "official_statement",
+            "geography_scope": "district",
+            "event_date": null
+          }
+        ],
+        "gaps": [
+          "The notice does not establish constituency-specific coverage."
+        ]
+      }
+    },
+    {
+      "input": {
+        "evidence": [
+          {
+            "source_id": "Rlead",
+            "read_status": "snippet_only",
+            "snippet": "Unverified road-work lead"
+          }
+        ]
+      },
+      "output": {
+        "findings": [],
+        "gaps": [
+          "No read-page evidence verified the requested finding."
+        ]
+      }
+    }
+  ],
+  "internet_Ranking": [
+    {
+      "input": {
+        "results": [
+          {
+            "index": 0,
+            "title": "Fictional official local notice"
+          },
+          {
+            "index": 1,
+            "title": "Unrelated district advertisement"
+          }
+        ]
+      },
+      "output": {
+        "ranking": [
+          {
+            "index": 0,
+            "score": 95
+          },
+          {
+            "index": 1,
+            "score": 5
+          }
+        ]
+      }
+    }
+  ]
+}

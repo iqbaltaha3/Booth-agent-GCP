@@ -31,7 +31,10 @@ class ChatResponse(BaseModel):
     session_id: str
     agent_path: list[str] = Field(default_factory=list)
     latency_ms: int | None = None
+    request_id: str | None = None
+    error_code: str | None = None
     status: Literal["complete", "partial", "needs_clarification", "failed"] = "complete"
+    partial_reason: str | None = None
     sources: list[WebSource] = Field(default_factory=list)
 
 

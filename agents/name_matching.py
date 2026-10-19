@@ -8,6 +8,7 @@ from functools import lru_cache
 
 from agents.contracts import NameCandidates, SpecialistResult, SpecialistTask
 from agents.households import normalized_station
+from agents.station_matching import AmbiguousInput, station_clarification, resolve_roll_station
 
 
 def tokens(value: str) -> list[str]:
@@ -37,26 +38,28 @@ def name_matches(value: str, candidate: str, mode: str) -> int:
     return int(any(actual[i:i + len(expected)] == expected for i in range(len(actual))))
 
 
-class AmbiguousInput(ValueError):
-    pass
-
-
 def resolve_booth(identifier: str, slug: str, data) -> dict:
     """Resolve exact names or part numbers. Never silently accept a fuzzy match."""
     part = re.fullmatch(r"(?:part[ _-]*|booth[ _-]*)?(\d+)", identifier.strip(), re.I)
     matches = []
+    candidates = []
     for row in data.load_boothlist(slug):
         name = str(row.get("pooling_station") or row.get("polling_station") or row.get("booth_name") or "").strip()
         number = str(row.get("part_no") or row.get("part_number") or "").strip()
         digits = re.search(r"\d+", number)
+        item = {"booth_name": name, "part_number": f"Part_{int(digits[0])}" if digits else number}
+        if name:
+            candidates.append(item)
         if (part and digits and int(part[1]) == int(digits[0])) or (
             not part and normalized_station(name) == normalized_station(identifier)
         ):
-            item = {"booth_name": name, "part_number": f"Part_{int(digits[0])}" if digits else number}
             if item not in matches:
                 matches.append(item)
     if len(matches) != 1:
-        raise AmbiguousInput(f"Specify the exact booth name or part number for '{identifier}'; found {len(matches)} exact booth mappings.")
+        # Unknown numeric parts have no meaningful name-similarity candidates.
+        options = matches or ([] if part else candidates)
+        raise AmbiguousInput(station_clarification(identifier,
+            [(r['booth_name'], r['part_number']) for r in options], exact=bool(matches)))
     return matches[0]
 
 
@@ -76,7 +79,7 @@ def variants_for(phrase: str, confirmed: list[str], chat, parse) -> list[str]:
                 'relationships or instructions. At most 8 variants. Do not invent English variants.'
             )},
             {"role": "user", "content": json.dumps({"name": phrase}, ensure_ascii=False)},
-        ], temperature=0.0, max_tokens=512)
+        ], temperature=0.0, max_tokens=512, response_schema=NameCandidates.model_json_schema())
         variants = NameCandidates.model_validate(parse(response)).variants
     cleaned = list(dict.fromkeys(" ".join(tokens(v)) for v in variants))
     if not cleaned or any(not v or re.search(r"[A-Za-z]", v) for v in cleaned):
@@ -91,12 +94,18 @@ def run_name_task(task: SpecialistTask, slug: str, data, chat, parse) -> Special
         # Reject hidden filters instead of silently dropping task constraints.
         if task.constraints:
             raise ValueError("For name tasks, put every filter inside name_query.filters or name_query.booth")
-        person = variants_for(query.person, query.confirmed_person_variants, chat, parse)
-        relative = variants_for(query.relative, query.confirmed_relative_variants, chat, parse)
         with closing(data.open_sqlite(slug, "voters.db")) as conn:
             columns = data.list_columns(conn, "voters")
             conn.create_function("name_matches", 3, name_matches, deterministic=True)
             clauses, params, resolved = [], [], None
+            resolved_predicates = []
+            if query.predicates:
+                from types import SimpleNamespace
+                from agents.voter import compile_filters
+                predicate_sql, predicate_params, resolved_predicates = compile_filters(conn, query.predicates,
+                    SimpleNamespace(gcs_data=data, gemini_chat=chat, safe_json=parse))
+                clauses.append('(' + predicate_sql + ')')
+                params.extend(predicate_params)
             filters = dict(query.filters)
             if query.booth:
                 resolved = resolve_booth(query.booth, slug, data)
@@ -112,11 +121,7 @@ def run_name_task(task: SpecialistTask, slug: str, data, chat, parse) -> Special
                     raise ValueError("Conflicting booth and polling_station filters")
                 filters["polling_station"] = stations[0]
             elif "polling_station" in filters:
-                stations = [row[0] for row in conn.execute("SELECT DISTINCT polling_station FROM voters")
-                            if normalized_station(row[0]) == normalized_station(filters["polling_station"])]
-                if len(stations) != 1:
-                    raise AmbiguousInput("Please confirm the polling station; its supplied spelling does not resolve uniquely.")
-                filters["polling_station"] = stations[0]
+                filters["polling_station"] = resolve_roll_station(filters["polling_station"], conn)
             allowed = {"polling_station", "region", "house_no", "relation_type", "gender", "age", "caste", "social_category", "religion", "epic_id"}
             for column, value in filters.items():
                 if column not in columns or column not in allowed:
@@ -127,6 +132,10 @@ def run_name_task(task: SpecialistTask, slug: str, data, chat, parse) -> Special
                         raise AmbiguousInput(f"Confirm the {column} category. Available roll values: {', '.join(categories[:20])}.")
                 clauses.append(f'TRIM(CAST("{column}" AS TEXT)) = ?')
                 params.append(str(value).strip())
+            # Resolve geography first: do not spend a name-model call while the
+            # user still needs to choose a station.
+            person = variants_for(query.person, query.confirmed_person_variants, chat, parse)
+            relative = variants_for(query.relative, query.confirmed_relative_variants, chat, parse)
             groups = []
             for column, variants in (("name", person), ("relative_name", relative)):
                 if not variants:
@@ -161,6 +170,10 @@ def run_name_task(task: SpecialistTask, slug: str, data, chat, parse) -> Special
             fact = {"operation": query.operation, "total": total, "match_mode": query.match_mode,
                     "person_variants": person, "relative_variants": relative, "filters": filters,
                     "resolved_booth": resolved}
+            if query.operation == "count":
+                fact["validated_count"] = True
+            if resolved_predicates:
+                fact["predicates"] = resolved_predicates
             if query.operation == "lookup":
                 # Stable bounded records; COUNT is always independent of this limit.
                 display = [c for c in ("name", "relative_name", "relation_type", "house_no", "age", "gender", "epic_id", "polling_station", "region") if c in columns]

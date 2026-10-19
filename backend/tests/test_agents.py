@@ -1,3 +1,4 @@
+from backend.tests.sql_model_fixture import with_specialist
 """Behavioral agent checks with synthetic rolls and scripted model responses."""
 
 import json
@@ -153,7 +154,7 @@ class AgentTests(unittest.TestCase):
         with patch.object(runner, "gemini_chat", return_value="broken output") as model:
             result = runner.run_local_agent("How many voters?", "seat")
         self.assertEqual(result["status"], "failed")
-        self.assertEqual(model.call_count, 8)
+        self.assertEqual(model.call_count, 2)  # One targeted repair, then stop.
         self.assertNotIn("I am", result["answer"])
 
     def test_unsubstantiated_finish_is_rejected(self):
@@ -181,7 +182,7 @@ class AgentTests(unittest.TestCase):
         assignment = task(name_query={"operation": "count", "person": "Shyam", "booth": "2"})
         replies = [delegate(assignment), '{"variants":["श्याम"]}',
                    '{"action":"finish","answer":"3 voters named Shyam are recorded at School, using the checked spelling श्याम.","evidence_task_ids":["t1"]}']
-        with patch.object(runner, "gemini_chat", side_effect=replies) as model:
+        with patch.object(runner, "gemini_chat", side_effect=with_specialist(replies)) as model:
             result = runner.run_local_agent("How many people named Shyam in booth 2?", "seat")
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["agent_path"], ["voter_agent"])
@@ -189,16 +190,16 @@ class AgentTests(unittest.TestCase):
 
     def test_ambiguous_name_task_resumes_with_user_selected_spellings(self):
         assignment = task(name_query={"operation": "count", "person": "Shyam", "booth": "2"})
-        with patch.object(runner, "gemini_chat", side_effect=[delegate(assignment), '{"variants":["श्याम","शयाम"]}',
-                         '{"action":"clarify","answer":"Should I include श्याम, शयाम, or both?"}']):
+        with patch.object(runner, "gemini_chat", side_effect=with_specialist([delegate(assignment), '{"variants":["श्याम","शयाम"]}',
+                         '{"action":"clarify","answer":"Should I include श्याम, शयाम, or both?"}'])):
             initial = runner.run_local_agent("How many Shyam in booth 2?", "seat", "sid")
         self.assertEqual(initial["status"], "needs_clarification")
         assignment.name_query.confirmed_person_variants = ["श्याम", "शयाम"]
-        with patch.object(runner, "gemini_chat", side_effect=[delegate(assignment),
-                         '{"action":"finish","answer":"4 voters match the two spellings at booth 2.","evidence_task_ids":["t1"]}']) as model:
+        with patch.object(runner, "gemini_chat", side_effect=with_specialist([delegate(assignment),
+                         '{"action":"finish","answer":"4 voters match the two spellings at booth 2.","evidence_task_ids":["t1"]}'])) as model:
             result = runner.run_local_agent("Both", "seat", "sid", pending_state=initial["pending_state"])
         self.assertEqual(result["status"], "complete")
-        self.assertEqual(model.call_count, 2)  # Confirmed spellings need no new transliteration.
+        self.assertEqual(model.call_count, 4)  # SQL, specialist finish and two coordinator calls; no transliteration.
         self.assertIn('"total": 4', model.call_args.args[0][1]["content"])
 
     def test_failed_evidence_can_finish_with_explicit_failure(self):

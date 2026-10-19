@@ -67,7 +67,7 @@ def main() -> int:
 
                 client = storage.Client()
                 bucket = client.bucket(args.bucket)
-                # Require at least voters.db
+                # History-only seats also carry a schema-valid empty voters.db.
                 blob = bucket.blob(f"{slug}/voters.db")
                 if not blob.exists():
                     print(

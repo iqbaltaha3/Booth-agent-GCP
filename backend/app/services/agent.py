@@ -60,8 +60,10 @@ def _call_agent_engine(
         "session_id": session_id,
         "agent_path": response.get("agent_path") or [],
         "status": response.get("status", "complete"),
+        "partial_reason": response.get("partial_reason"),
         "pending_state": response.get("pending_state"),
         "voter_context": response.get("voter_context", voter_context or {}),
         "diagnostics": response.get("diagnostics", []),
         "sources": response.get("sources", []),
+        "request_id": response.get("request_id"), "error_code": response.get("error_code"),
     }

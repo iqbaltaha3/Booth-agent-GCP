@@ -30,11 +30,13 @@ class MemorySessions:
     """Local adapter, with the same commit-on-success behavior as shared storage."""
     def __init__(self):
         self.records = {}
+        self.turn_records = {}
         self.locks = {}
         self.guard = RLock()
 
     def clear(self):
         self.records.clear()
+        self.turn_records.clear()
         self.locks.clear()
 
     @contextmanager
@@ -49,6 +51,11 @@ class MemorySessions:
             if state["constituency_id"] != slug:
                 raise SessionSeatMismatch("Session belongs to another constituency")
             yield state
+            turns = self.turn_records.setdefault(key, {})
+            for trace in state.pop("_turn_traces", []):
+                turns[trace["request_id"]] = copy.deepcopy(trace)
+            while len(turns) > 24:
+                del turns[next(iter(turns))]
             self.records[key] = copy.deepcopy(state)
         finally:
             lock.release()
@@ -109,7 +116,24 @@ class FirestoreSessions:
             now = datetime.now(timezone.utc)
             updates = {"lease_owner": None, "lease_until": now}
             if save:
-                encoded = json.dumps(state, ensure_ascii=False, default=str)
+                saved_state = copy.deepcopy(state)
+                traces = saved_state.pop("_turn_traces", [])
+                ids = list(saved_state.get("trace_ids", []))
+                for trace in traces:
+                    request_id = trace["request_id"]
+                    # Same private collection and expiry field as sessions, so
+                    # the existing TTL policy also applies to trace records.
+                    ref = self.client.collection("booth_agent_sessions").document(document.id + "-turn-" + request_id)
+                    encoded_trace = json.dumps(trace, ensure_ascii=False, default=str)
+                    if len(encoded_trace.encode()) > 240000:
+                        encoded_trace = json.dumps({"request_id": request_id, "status": trace.get("status"), "trace_omitted": "Trace exceeded private diagnostic budget"})
+                    transaction.set(ref, {"trace_json": encoded_trace,
+                        "expires_at": now + timedelta(hours=get_settings().session_ttl_hours)})
+                    ids.append(request_id)
+                for old in ids[:-24]:
+                    transaction.delete(self.client.collection("booth_agent_sessions").document(document.id + "-turn-" + old))
+                saved_state["trace_ids"] = ids[-24:]
+                encoded = json.dumps(saved_state, ensure_ascii=False, default=str)
                 if len(encoded.encode()) > 800000:
                     raise ValueError("Session state exceeds its storage budget")
                 updates.update(state_json=encoded, expires_at=now + timedelta(hours=get_settings().session_ttl_hours))

@@ -32,20 +32,25 @@ def chat(
                     history=list(state["history"]), pending_state=state["pending_state"],
                     voter_context=state.get("voter_context", {}),
                 )
-            except RuntimeError as error:
+            except Exception as error:
                 raise HTTPException(502, "AI service unavailable") from error
             state["pending_state"] = result.get("pending_state")
             state["voter_context"] = result.get("voter_context", state.get("voter_context", {}))
             state["diagnostics"] = (state.get("diagnostics", []) + result.get("diagnostics", []))[-16:]
+            if result.get("turn_trace"):
+                state.setdefault("_turn_traces", []).append(result["turn_trace"])
             response = ChatResponse(
                 answer=result.get("answer", ""), charts=result.get("charts") or [],
                 session_id=sid, agent_path=result.get("agent_path") or [],
                 latency_ms=result.get("latency_ms"), status=result.get("status", "complete"),
                 sources=result.get("sources", []),
+                partial_reason=result.get("partial_reason"),
+                request_id=result.get("request_id"), error_code=result.get("error_code"),
             )
             state["history"] = (state["history"] + [
                 {"role": "user", "content": body.question},
                 {"role": "assistant", "content": response.answer,
+                 "status": response.status, "partial_reason": response.partial_reason,
                  "sources": response.model_dump(mode="json")["sources"]},
             ])[-24:]
         return response

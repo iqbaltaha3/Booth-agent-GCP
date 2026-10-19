@@ -117,6 +117,15 @@ def get_portfolio(
     """Resolve a booth identifier and return its prepared report."""
     slug = require_constituency(constituency_id, user)
 
+    coverage = data.load_coverage(slug)
+    if coverage.get("portfolio_available") is False:
+        raise HTTPException(404, "Booth reports have not been added for this constituency")
+    requested_part = _norm_part(booth_identifier)
+    if requested_part and coverage.get("portfolio_booth_ids") is not None:
+        available = {_norm_part(value) for value in coverage["portfolio_booth_ids"]}
+        if requested_part not in available:
+            raise HTTPException(404, "Report for this booth has not been added yet")
+
     # Try to resolve via boothlist first
     booth_name = booth_identifier
     part_number = _norm_part(booth_identifier)
@@ -155,7 +164,7 @@ def get_portfolio(
             ):
                 target = f
                 break
-    if not target and files:
+    if not target and files and not coverage:
         # Fuzzy on filenames
         close = difflib.get_close_matches(
             booth_identifier.replace(" ", "_"),

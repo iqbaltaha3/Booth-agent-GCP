@@ -62,7 +62,11 @@ def _download(bucket: str, slug: str, filename: str) -> Path:
     directory = Path(tempfile.mkdtemp(prefix="booth-agent-"))
     path = directory / Path(filename).name
     try:
-        _gcs_client().bucket(bucket).blob(f"{slug}/{filename}").download_to_filename(str(path))
+        from agents.execution import remaining
+        timeout = min(60, remaining(reserve=15))
+        if timeout <= 0:
+            raise TimeoutError("Data retrieval deadline exceeded")
+        _gcs_client().bucket(bucket).blob(f"{slug}/{filename}").download_to_filename(str(path), timeout=timeout, retry=None)
     except NotFound as error:
         raise FileNotFoundError(f"Missing constituency file: {filename}") from error
     return path
@@ -70,11 +74,24 @@ def _download(bucket: str, slug: str, filename: str) -> Path:
 
 def open_sqlite(slug: str, filename: str) -> sqlite3.Connection:
     """Open SQLite read-only so generated SQL cannot modify the voter records."""
+    if filename == "voters.db" and load_coverage(slug).get("voter_available") is False:
+        raise FileNotFoundError("Voter data has not been added for this constituency; zero records do not mean zero voters")
     path = resolve_data_path(slug, filename)
     connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
     connection.execute("PRAGMA query_only = ON")
     connection.row_factory = sqlite3.Row
+    connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 128000)
+    from agents.execution import remaining
+    connection.set_progress_handler(lambda: int(remaining(reserve=15) <= 0), 10000)
     return connection
+
+
+def load_coverage(slug: str) -> dict:
+    """Legacy seats without metadata retain their existing behavior."""
+    try:
+        return json.loads(resolve_data_path(slug, "coverage.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
 
 
 def list_tables(connection: sqlite3.Connection) -> list[str]:
@@ -107,6 +124,8 @@ def execute_select(connection: sqlite3.Connection, sql: str, max_rows: int = 80)
         raise ValueError(statement)
     cursor = connection.execute(statement)
     rows = cursor.fetchmany(max_rows + 1)
+    if len(json.dumps([list(row) for row in rows], ensure_ascii=False, default=str).encode()) > 64000:
+        raise ValueError("Observation exceeds the evidence budget; select fewer columns, fewer rows, or an aggregate")
     return {
         "columns": [column[0] for column in cursor.description],
         "rows": [list(row) for row in rows[:max_rows]],

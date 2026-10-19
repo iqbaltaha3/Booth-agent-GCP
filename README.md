@@ -87,12 +87,62 @@ Frontend → POST /agent/chat → authorize constituency + load session state
                                ↓
                          ReAct coordinator
                                ↓ focused, validated tasks
-                  Voter / History / Portfolio specialists
+                  Voter / History / Portfolio / Research specialists
                                ↓ structured facts and sources
                          inspect → refine / clarify / finish
 ```
 
 Specialists read the selected constituency's files through the shared data service.
+The coordinator and specialists use native Gemini response schemas with Pydantic
+business validation. History handles electoral results; general historical
+background uses public research without a recent-news date window. Election
+rankings are checked for requested geography/year, numeric ordering, vote margins,
+and required comparison fields before presentation.
+
+`AGENT_TIMEOUT_SECONDS` sets the in-process turn budget (default 240 seconds,
+clamped to 30–540); specialist work reserves 15 seconds for synthesis. Repeated
+invalid actions stop after one repair, and private diagnostics record model finish
+reasons, rejected actions, and terminal outcomes. Verified voter references and a
+small booth/election working context support follow-ups. A new objective can
+supersede an outstanding clarification. The UI labels failures and clarification requests. Partial status remains internal;
+no partial-answer banner or separate partial explanation is shown.
+For Gemini 2.5 Flash, `GEMINI_THINKING_BUDGET` defaults to 1,024 tokens, capped
+against each call's output budget; short transliterations disable thinking. Public
+research defaults to four pages and reserves separate planning/search/extraction/
+finding budgets. General source caveats are separate from missing requested details.
+Explicit whole-constituency scope and source-only instructions are preserved across
+clarifications. Repeated scope questions are rejected. SQL specialists can identify
+final observations separately from exploratory samples; absence claims require
+zero-match evidence rather than sparse or truncated results. Roll counts describe
+registered voters, not ballots cast.
+The orchestrator identifies itself as Arjun, your AI booth agent; Arjun Booth
+Agent is the product name. Greetings, identity, capabilities and product help use an explicit
+conversation response type and trusted self-knowledge; they do not require a
+specialist call or an exact greeting phrase. The chat welcome introduces the agent
+without suggested question buttons; the message-input hint remains available.
+
+Run offline checks with `PYTHONPATH=backend:. python -m unittest discover -s backend/tests -q`.
+The optional `PYTHONPATH=backend:. python scripts/evaluate_harness.py --live --trials 3`
+runs 45 synthetic routing cases through the configured Gemini connection. It makes
+billed model calls, reads no voter records, and checks routing rather than final
+factual correctness. See [the harness refinement](docs/HARNESS_REFINEMENT.md).
+
+The orchestrator routes typed requests to Voter, History, Booth Analysis and Internet.
+Voter owns record lookups and SQL, including factual questions mentioning a booth;
+Booth Analysis owns prepared reports. Verified population filters support follow-ups
+and reset on a new population request. Canonical counts and lookups use parameterized
+queries; analytical SQL is checked against the requested scope and filters.
+Few-shot examples are loaded from `agents/prompts/few_shot_examples.json`.
+Local station matching also offers up to five source-derived choices for partial
+or misspelled station names. Approximate matches require user confirmation before
+the voter search runs; exact names and booth/part numbers retain their existing behavior.
+Private per-turn diagnostics are bounded to 24 records per session and use the
+existing Firestore expiration policy; they are not returned through the chat API.
+Run fictional end-to-end conversations with
+`PYTHONPATH=backend:. python scripts/evaluate_voter_harness.py --live --trials 5`.
+Both live evaluation scripts make billed model calls. See the
+[harness release report](docs/AGENT_HARNESS_RELEASE.md) for results and limitations.
+
 The Vertex AI Agent Engine topology below is a deployment target: its client exists,
 but `agents/deploy_agent_engine.py` is still a placeholder and does not deploy an
 ADK graph. Configuring an external engine does not automatically install this runtime.
@@ -550,3 +600,60 @@ The user-facing website lives in **`frontend/`**.
 → **[frontend/README.md](frontend/README.md)**
 
 It explains installing Node.js, Firebase login, building, deploying, and connecting your domain in plain language.
+
+
+## Import constituency artifact snapshots
+
+The source artifact folders are preserved. Normalize the original named databases,
+CSV files, and either `booth_analysis` or `03-booth_analysis` with:
+
+```bash
+python3 scripts/import_artifacts.py "/path/to/ARTIFACTS"
+python3 scripts/import_artifacts.py "/path/to/ARTIFACTS" --apply
+```
+
+The first command audits without changing files. Add `--slug handia` to process
+one constituency. Applying replaces each selected local snapshot, creates schema-valid
+empty voter databases and empty portfolio directories for history-only seats,
+and refreshes constituency YAMLs and the manifest. Keep a backup of a previous
+local snapshot if it must remain available. Private artifacts stay in ignored
+`legacy-data/`; the original source directory is never modified.
+
+Coverage metadata distinguishes unavailable data from zero matches. Phulpur's
+115/457 and Handia's 391/451 are owner-declared figures. Station names, report
+files, and CSV rows are not interchangeable booth counts. If the report count
+changes, the importer clears the old completed-booth declaration until reconciled.
+Update the declarations in `scripts/import_artifacts.py` after confirming new
+coverage. Other complete seats retain a declared-complete label pending mapping.
+
+Preview or upload constituency by constituency:
+
+```bash
+python3 scripts/upload_artifacts.py --slug handia
+python3 scripts/upload_artifacts.py --slug handia --replace
+python3 scripts/upload_artifacts.py --slug handia --replace --execute
+```
+
+Omit `--slug` to process all configured constituencies. The default destination is
+`booth-agent-data-dev`; override with `--bucket`. Uploads compare checksums and
+preserve destination-only objects by default. Use `--replace` to make each selected
+cloud constituency match the new local edition, removing obsolete cloud-only files.
+Preview with `--replace` before adding `--execute`.
+Per-seat upload logs are written to `/tmp/booth-upload-<slug>.log`. GCS does not
+store empty directories; an absent report prefix is treated as empty.
+
+Deploy the updated backend and frontend to enable coverage labels and guards.
+Restart/redeploy the backend after artifact updates because downloaded files are
+cached for the process lifetime. Newly configured seats also require deployment
+of the manifest and appropriate Firebase constituency access claims.
+
+
+Election-result requests now receive the current India date and an executed
+catalog of history tables with row counts. Empty tables are distinguished from
+populated election periods; available-years questions can cite these counts
+without another model-generated query. Year/type corrections retain the earlier
+result objective, and election facts cannot use the conversation-only response
+path. Lok Sabha tables in these constituency snapshots describe the selected
+assembly segment; segment leaders and totals do not establish full parliamentary
+constituency winners. Regression checks include empty-year coverage, year
+follow-ups, correction context, and the factual-evidence guard.

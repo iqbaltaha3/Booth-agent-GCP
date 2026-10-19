@@ -26,7 +26,7 @@ def query(body, user: dict, filename: str) -> dict:
         with closing(data.open_sqlite(slug, filename)) as connection:
             return data.execute_select(connection, body.sql)
     except FileNotFoundError as error:
-        raise HTTPException(404, "Constituency database not found") from error
+        raise HTTPException(404, str(error)) from error
     except (ValueError, sqlite3.Error) as error:
         raise HTTPException(400, str(error)) from error
 
@@ -58,7 +58,7 @@ def schema(seat: str, user: dict, filename: str) -> dict:
                     }
             return {"tables": tables, "schema_text": "\n".join(lines) or "(no tables)", "samples": samples}
     except FileNotFoundError as error:
-        raise HTTPException(404, "Constituency database not found") from error
+        raise HTTPException(404, str(error)) from error
 
 
 @router.post("/voter/query", response_model=VoterQueryResponse)

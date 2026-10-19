@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 
 from app.auth import get_current_user, user_may_access
 from app.config import get_settings
+from app.services.data import load_coverage
 
 router = APIRouter(tags=["account"])
 
@@ -19,7 +20,15 @@ def allowed_constituencies(user: dict) -> list:
     with path.open(encoding="utf-8") as file:
         manifest = json.load(file)
     items = manifest if isinstance(manifest, list) else manifest["constituencies"]
-    return [item for item in items if user_may_access(user, item["slug"])]
+    allowed = []
+    for item in items:
+        if user_may_access(user, item["slug"]):
+            coverage = load_coverage(item["slug"])
+            summary = {k: coverage[k] for k in (
+                "status", "history_available", "voter_available", "portfolio_available",
+                "completed_booths", "total_booths", "count_basis") if k in coverage}
+            allowed.append({**item, "coverage": summary})
+    return allowed
 
 
 @router.get("/auth/me")
