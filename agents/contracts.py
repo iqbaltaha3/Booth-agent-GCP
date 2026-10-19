@@ -58,7 +58,8 @@ class NameQuery(Contract):
     booth: str | None = Field(default=None, max_length=500)
     filters: dict[str, str | int | float] = Field(default_factory=dict, max_length=20)
     predicates: list[VoterFilter] = Field(default_factory=list, max_length=12)
-    # Populate only after the user explicitly chooses these Hindi spellings.
+    # Optional caller-supplied spellings. Normal transliteration alternatives are
+    # resolved and searched together inside the Voter boundary.
     confirmed_person_variants: list[str] = Field(default_factory=list, max_length=8)
     confirmed_relative_variants: list[str] = Field(default_factory=list, max_length=8)
 

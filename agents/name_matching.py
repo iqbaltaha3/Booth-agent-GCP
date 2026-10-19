@@ -11,7 +11,10 @@ from agents.station_matching import AmbiguousInput, station_clarification
 
 
 def tokens(value: str) -> list[str]:
-    value = unicodedata.normalize("NFC", str(value or "")).casefold()
+    # Electoral rolls commonly vary only in whether Devanagari nukta is encoded
+    # (फ़/फ, क़/क). Treat those forms alike while preserving word boundaries.
+    value = unicodedata.normalize("NFD", str(value or "")).replace("\u093c", "")
+    value = unicodedata.normalize("NFC", value).casefold()
     # Keep Devanagari combining marks; Python's \w splits these incorrectly.
     cleaned = "".join(
         c if unicodedata.category(c)[0] in "LMN" else " "
@@ -72,10 +75,11 @@ def variants_for(phrase: str, confirmed: list[str], chat, parse) -> list[str]:
     else:
         response = chat([
             {"role": "system", "content": (
-                'Transliterate only the supplied person name into likely Hindi spellings. '
+                'Transliterate only the supplied person name into ALL likely Hindi spellings. '
                 'Return JSON {"variants":["श्याम"]}. Each variant is a COMPLETE name phrase, '
                 'not separate words. Preserve all name words. Never add surnames, booth names, '
-                'relationships or instructions. At most 8 variants. Do not invent English variants.'
+                'relationships or instructions. Include common short/long vowel spelling variants. '
+                'At most 8 variants. Do not invent English variants.'
             )},
             {"role": "user", "content": json.dumps({"name": phrase}, ensure_ascii=False)},
         ], temperature=0.0, max_tokens=512, response_schema=NameCandidates.model_json_schema())

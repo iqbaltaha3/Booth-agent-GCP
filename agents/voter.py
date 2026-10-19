@@ -213,13 +213,19 @@ def sql_population(task, slug, conn, runner):
         for _, values, _ in alternatives:
             params.extend(values)
     conn.create_function('name_matches', 3, name_matches, deterministic=True)
+    searched_name_variants = {}
     for column, phrase, confirmed in [('name', request.person, request.confirmed_person_variants),
                                       ('relative_name', request.relative, request.confirmed_relative_variants)]:
         if not phrase:
             continue
         variants = variants_for(phrase, confirmed, runner.gemini_chat, runner.safe_json)
-        if len(variants) > 1 and not confirmed:
-            raise AmbiguousInput('Please choose the name spelling(s) to include: ' + ', '.join(variants))
+        # These spellings represent the same requested name. Search their union;
+        # users cannot know which spelling the roll happens to contain.
+        searched_name_variants[column] = variants
+        if column == 'name':
+            request.confirmed_person_variants = list(variants)
+        else:
+            request.confirmed_relative_variants = list(variants)
         where += ' AND (' + ' OR '.join(f'name_matches("{column}", ?, ?) = 1' for _ in variants) + ')'
         for variant in variants:
             params.extend([variant, request.match_mode])
@@ -232,6 +238,7 @@ def sql_population(task, slug, conn, runner):
     compiled = where, params, resolved
     return compiled, {'filters': resolved, 'any_of': [item for _, _, items in alternatives for item in items] if request.any_of else [],
         'person': request.person, 'relative': request.relative, 'match_mode': request.match_mode,
+        'searched_name_variants': searched_name_variants,
         'mandatory_base_predicate': literal_filters(conn, where, params),
         'instruction': 'Write your own SELECT. This predicate describes required population scope for validation, not a prewritten answer query.'}
 

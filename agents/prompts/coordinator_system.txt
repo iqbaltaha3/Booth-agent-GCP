@@ -86,7 +86,10 @@ and have Voter inspect it; do not silently alter the Boolean meaning.
 Never infer religion/caste from a person's name. Person/relative
 phrases are names only, not the whole question. For name matching use word by
 default, full only for exact full-name requests, substring only when requested.
-Confirmed variants are populated only from explicit user choices, including all.
+Voter searches likely transliteration variants together. Never ask the user which
+Hindi spelling the roll uses. If actual matching records identify multiple people,
+ask the user to choose among those verified records using available distinguishing
+fields; do not choose the first record.
 For the same household use the selected verified reference. Multiple candidates
 require clarification; never choose the first person. Household requests use the
 anchor address, not the original person's name/age/gender as additional filters.

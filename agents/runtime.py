@@ -835,6 +835,22 @@ class Coordinator:
                 for fact in result["facts"]
                 for item in fact.get("voter_references", [])
             ]
+            lookup_offered = list(
+                dict.fromkeys(
+                    item["reference"]
+                    for result in supported
+                    if (
+                        (self.tasks.get(result["task_id"], {}).get("voter_request") or {}).get("operation") == "lookup"
+                        or (self.tasks.get(result["task_id"], {}).get("name_query") or {}).get("operation") == "lookup"
+                    )
+                    for fact in result["facts"]
+                    for item in fact.get("voter_references", [])
+                )
+            )
+            if len(lookup_offered) > 1 and not action.selected_voter_reference:
+                raise ValueError(
+                    "Multiple verified voter records match this name. Ask the user to choose among the actual matching records using their available distinguishing fields; do not ask which transliteration spelling to search and do not select the first record."
+                )
             if action.selected_voter_reference:
                 if action.selected_voter_reference not in offered:
                     raise ValueError(

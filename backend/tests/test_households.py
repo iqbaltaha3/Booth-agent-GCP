@@ -180,8 +180,10 @@ class HouseholdTests(unittest.TestCase):
         query = assignment(name_query={"operation": "lookup", "person": "अन्य", "relative": "", "match_mode": "substring"})
         query.name_query.person = "अलग"
         with patch.object(runner, "gemini_chat", side_effect=with_specialist([json.dumps({"action": "delegate", "tasks": [query.model_dump()]}),
-                         '{"action":"finish","answer":"Two people match.","evidence_task_ids":["t1"]}'])):
+                         '{"action":"finish","answer":"Two people match.","evidence_task_ids":["t1"]}',
+                         '{"action":"clarify","answer":"Two voter records match. Which person do you mean?"}'])):
             result = runner.run_local_agent("Find matching people", "seat")
+        self.assertEqual(result["status"], "needs_clarification")
         self.assertEqual(len(result["voter_context"]["references"]), 2)
         self.assertIsNone(result["voter_context"]["selected_reference"])
 
