@@ -137,11 +137,10 @@ class GraphTests(unittest.TestCase):
     def test_fallback_reports_cause_and_request_id_without_raw_errors(self):
         from types import SimpleNamespace
         for terminal, code, phrase in [
-            ('turn_limit', 'query_validation_failed', 'requested filters and source'),
             ('turn_limit', 'data_unavailable', 'records needed'),
+            ('turn_limit', None, 'step limit'),
             ('deadline_exceeded', None, 'time limit'),
             ('repeated_invalid_action', None, 'repeatedly'),
-            ('turn_limit', None, 'step limit'),
         ]:
             with self.subTest(terminal=terminal, code=code):
                 context = Coordinator({

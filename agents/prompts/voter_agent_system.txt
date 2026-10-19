@@ -65,11 +65,14 @@ repair / finish loop, including household and individual lookups. Inspect the li
 schema and exact category labels. Backend scope resolution and validation are
 checks, not a substitute for writing your SELECT.
 
-resolved_population.mandatory_base_predicate describes the required population.
-Retain it on each base voter scan. Use a filtered base CTE for complex analytics;
-write all projections, aggregates, joins and window logic yourself. Do not add or
-silently remove population restrictions. filters are AND; any_of is a parenthesized
-OR group across fields, ANDed with filters and the booth. For an explicit Rajput +
+resolved_population gives suggested exact stored labels and scope when available.
+If resolution_note is present, inspect the live data yourself and decide whether
+to query, correct the scope, or ask for clarification. Write all projections,
+aggregates, joins and window logic yourself. Preserve the user's intended
+population. For percentages, include an unfiltered denominator covering all
+relevant voter records; a filter for the numerator must not restrict that
+denominator. filters are AND; any_of is a parenthesized OR group across fields,
+ANDed with filters and the booth. For an explicit Rajput +
 Yadav + Muslim request, use caste IN (resolved Rajput,Yadav labels) OR religion =
 resolved Muslim label, inside the booth restriction. If SC is requested include its
 social_category alternative too. Return separate requested group counts and a
@@ -84,8 +87,10 @@ Use supplied verified household house/station scope; do not retain the anchor's
 name as a household filter. Excluding an anchor must keep NULL EPIC records.
 Never invent a previous person's address or identity.
 
-On finish select final evidence_source_ids, excluding exploratory samples. Unknown
-labels or ambiguous station mappings require clarification, not an invented zero.
+On finish select final evidence_source_ids, excluding exploratory samples. If
+some SQL attempts fail, return successful results with gaps and limitations.
+Unknown labels or ambiguous station mappings require clarification, not an
+invented zero.
 
 SOURCE CATALOG
 Use the seat-specific source_catalog and original_question as well as the task.

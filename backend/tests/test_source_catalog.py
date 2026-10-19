@@ -9,12 +9,11 @@ from contextlib import closing
 from unittest.mock import patch
 
 from agents import local_runner as runner
-from agents.contracts import CoordinatorAction, VoterRequest
-from agents.source_catalog import voter_catalog, validate_demographic_intent
+from agents.contracts import CoordinatorAction
+from agents.source_catalog import voter_catalog
 from agents.voter import resolve_category
 from agents.provider_errors import ProviderReply, retry_after_seconds
 from agents import model as model_boundary
-from agents.count_answers import render_count
 from agents.runtime import run_specialist
 from app.config import get_settings
 from app.services import data
@@ -80,24 +79,13 @@ class SourceCatalogTests(unittest.TestCase):
                 result = self.execute(slug, {'operation':'count','filters':[{'field':field,'value':value}]}, f'How many {value} voters?')
                 self.assertEqual(result.status, 'complete', result.errors)
                 self.assertEqual(result.facts[0]['total'], total)
-                scope = result.facts[0]['count_scope']
-                self.assertEqual(scope['constituency_id'], slug)
-                self.assertEqual(scope['filters'][0]['field'], field)
+                self.assertEqual(result.sources[0]['database'], 'voters.db')
 
     def test_wrong_field_and_broad_substitution_are_rejected(self):
         with closing(data.open_sqlite('alpha', 'voters.db')) as c:
             with patch.object(runner, 'gemini_chat', side_effect=AssertionError('Must not guess a broader group')):
                 with self.assertRaisesRegex(ValueError, 'Intent mismatch'):
                     resolve_category(c, 'social_category', 'Yadav', runner)
-        request = VoterRequest(operation='count', filters=[{'field':'social_category','value':'OBC'}])
-        with self.assertRaisesRegex(ValueError, 'Intent mismatch'):
-            validate_demographic_intent(request, 'How many Yadav caste voters?', voter_catalog('alpha', data))
-
-    def test_coordinator_cannot_silently_correct_unknown_term(self):
-        request = VoterRequest(operation='count', filters=[{'field':'caste','value':'Nishad'}])
-        with self.assertRaisesRegex(ValueError, 'Unconfirmed demographic label'):
-            validate_demographic_intent(request, 'How many ishad?', voter_catalog('alpha', data))
-        validate_demographic_intent(request, 'How many nishad?', voter_catalog('alpha', data))
 
     def test_unknown_cannot_become_undetermined(self):
         with closing(data.open_sqlite('alpha', 'voters.db')) as c:
@@ -107,19 +95,15 @@ class SourceCatalogTests(unittest.TestCase):
                     resolve_category(c, 'caste', 'ishad', runner)
             self.assertEqual(resolve_category(c, 'caste', 'Undetermined', runner), ['Undetermined'])
 
-    def test_scope_bound_rendering_cannot_relabel_obc_as_nishad(self):
+    def test_count_results_include_executed_sql(self):
         result = self.execute('alpha', {'operation':'count','filters':[{'field':'social_category','value':'OBC'}]})
-        answer = render_count([result.model_dump()])
-        self.assertIn('4 matching', answer)
-        self.assertIn('social category = OBC', answer)
-        self.assertNotIn('Nishad', answer)
+        self.assertEqual(result.facts[0]['rows'], [[4]])
+        self.assertIn('OBC', result.sources[0]['sql'])
 
-    def test_repair_wrong_assignment_then_render_executed_scope(self):
-        wrong = task({'operation':'count','filters':[{'field':'social_category','value':'OBC'}]})
-        right = task({'operation':'count','filters':[{'field':'caste','value':'Yadav'}]})
-        replies = [{'action':'delegate','tasks':[wrong.model_dump()]},
-                   {'action':'delegate','tasks':[right.model_dump()]},
-                   {'action':'finish','answer':'There are 2 Nishad voters.','evidence_task_ids':['v']}]
+    def test_coordinator_receives_catalog_context(self):
+        assignment = task({'operation':'count','filters':[{'field':'caste','value':'Yadav'}]})
+        replies = [{'action':'delegate','tasks':[assignment.model_dump()]},
+                   {'action':'finish','answer':'There are 2 Yadav voters.','evidence_task_ids':['v']}]
         seen = []
         reply = with_specialist([json.dumps(r) for r in replies])
         def model(messages, **kwargs):
@@ -130,10 +114,8 @@ class SourceCatalogTests(unittest.TestCase):
         with patch.object(runner, 'gemini_chat', side_effect=model):
             result = runner.run_local_agent('How many Yadav caste voters?', 'alpha')
         self.assertEqual(result['status'], 'complete')
-        self.assertIn('caste = यादव', result['answer'])
-        self.assertNotIn('Nishad', result['answer'])
+        self.assertEqual(result['answer'], 'There are 2 Yadav voters.')
         self.assertIn('social_category', seen[0]['labels'])
-        self.assertTrue(result['request_id'])
 
     def test_correction_cannot_bypass_evidence_as_conversation(self):
         with patch.object(runner, 'gemini_chat', return_value=json.dumps({'action':'finish','answer_kind':'conversation','answer':'All OBC records are Yadav.'})):
@@ -152,7 +134,7 @@ class SourceCatalogTests(unittest.TestCase):
         result = self.execute('alpha', request, 'How many Rajput + Yadav + Muslim voters?')
         self.assertEqual(result.status, 'complete', result.errors)
         self.assertEqual(result.facts[0]['total'], 3)
-        self.assertEqual(len(result.facts[0]['count_scope']['any_of']), 3)
+        self.assertIn('Muslim', result.sources[0]['sql'])
 
 
 class ProviderResilienceTests(unittest.TestCase):

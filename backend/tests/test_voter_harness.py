@@ -11,8 +11,6 @@ from agents import local_runner as runner
 from agents.contracts import SpecialistTask, CoordinatorAction, ResearchAction
 from agents.runtime import run_specialist
 from backend.tests.sql_model_fixture import specialist_reply, with_specialist
-from agents.voter import validate_count_answer
-from agents.query_validation import check_query
 from agents.research import SearchPlan, Ranking, Findings
 from app.config import get_settings
 from app.services import data
@@ -89,20 +87,17 @@ class VoterHarnessTests(unittest.TestCase):
             result=self.execute(request)
             self.assertEqual(result.status,'complete')
             self.assertEqual(result.facts[0]['total'],expected)
-            self.assertTrue(result.facts[0]['validated_count'])
         self.assertEqual(self.context['population']['filters'],[])
 
-    def test_full_coordinator_uses_new_payload_and_repairs_wrong_synthesis(self):
+    def test_full_coordinator_keeps_its_answer_from_sql_evidence(self):
         assignment=task({'operation':'count','filters':[{'field':'religion','value':'Muslim'}]})
         replies=[{'action':'delegate','tasks':[assignment.model_dump()]},
-                 {'action':'finish','answer':'There are 0 Muslim voters.','evidence_task_ids':['v']},
                  {'action':'finish','answer':'There are 3 Muslim voters.','evidence_task_ids':['v']}]
         with patch.object(runner,'gemini_chat',side_effect=with_specialist([json.dumps(r) for r in replies])):
             result=runner.run_local_agent('How many Muslim voters?','seat')
         self.assertEqual(result['status'],'complete')
-        self.assertEqual(result['answer'],'There are 3 matching voter records in the available data.\nRecorded filters: religion = Muslim.')
+        self.assertEqual(result['answer'],'There are 3 Muslim voters.')
         self.assertEqual(result['voter_context']['population']['filters'][0]['value'],'Muslim')
-        self.assertTrue(any(e.get('event')=='coordinator_rejected' for e in result['turn_trace']['events']))
 
     def test_provider_failure_does_not_create_population(self):
         with patch.object(runner,'gemini_chat',return_value='<<LLM_ERROR: provider unavailable>>'):
@@ -122,11 +117,16 @@ class VoterHarnessTests(unittest.TestCase):
         self.assertEqual(result.facts[0]['total'],1)
         self.assertEqual(len(self.context['population']['filters']),2)
 
-    def test_unknown_category_is_not_a_zero(self):
-        with patch.object(runner,'gemini_chat',return_value='{"values":[],"ambiguous":false}'):
-            result=self.execute({'operation':'count','filters':[{'field':'religion','value':'Unknown category'}]})
-        self.assertEqual(result.status,'needs_clarification')
-        self.assertFalse(result.facts)
+    def test_unresolved_category_is_passed_to_agent_for_inspection(self):
+        replies = [
+            '{"values":[],"ambiguous":false}',
+            json.dumps({'action':'sql','sql':'SELECT DISTINCT religion FROM voters ORDER BY religion'}),
+            json.dumps({'action':'finish','status':'partial','gaps':['Requested category was not found in the observed labels.']}),
+        ]
+        with patch.object(runner,'gemini_chat',side_effect=replies):
+            result=run_specialist(task({'operation':'aggregate','filters':[{'field':'religion','value':'Unknown category'}]}), 'seat', {}, runner, self.context)
+        self.assertEqual(result.status,'partial')
+        self.assertEqual(result.facts[0]['rows'], [['Hindu'], ['Muslim']])
         self.assertNotIn('population',self.context)
 
     def test_valid_zero_has_executed_resolved_filters(self):
@@ -140,9 +140,6 @@ class VoterHarnessTests(unittest.TestCase):
         with patch.object(runner,'gemini_chat',return_value='{"values":["Muslim"],"ambiguous":false}'):
             result=self.execute({'operation':'count','filters':[{'field':'religion','value':'मुस्लिम'}]})
         self.assertEqual(result.facts[0]['total'],3)
-        with patch.object(runner,'gemini_chat',return_value='{"values":["Invented"],"ambiguous":false}'):
-            result=self.execute({'operation':'count','filters':[{'field':'religion','value':'अज्ञात'}]})
-        self.assertEqual(result.status,'needs_clarification')
 
     def test_demographic_count_does_not_invoke_name_model(self):
         with patch.object(runner,'gemini_chat') as model:
@@ -174,15 +171,6 @@ class VoterHarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'stale'):
             self.execute({'operation':'lookup','reference':'ref'})
 
-    def test_numeric_and_booth_filters_survive_analytical_queries(self):
-        from agents.voter import compile_filters,population_filters
-        assignment=task({'operation':'aggregate','booth':'1','filters':[{'field':'age','operator':'gt','value':'60'}]})
-        with closing(data.open_sqlite('seat','voters.db')) as c:
-            compiled=compile_filters(c,population_filters(assignment.voter_request,'seat',data),runner)
-            check_query("SELECT gender,COUNT(*) FROM voters WHERE age>60 AND polling_station='School' GROUP BY gender",assignment,c,runner,compiled)
-            with self.assertRaises(ValueError):
-                check_query("SELECT gender,COUNT(*) FROM voters WHERE age>60 GROUP BY gender",assignment,c,runner,compiled)
-
     def test_exact_booth_count(self):
         result=self.execute({'operation':'count','booth':'1','filters':[{'field':'religion','value':'Muslim'}]})
         self.assertEqual(result.facts[0]['total'],2)
@@ -200,57 +188,20 @@ class VoterHarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'No current verified population'):
             self.execute({'operation':'count','population_mode':'refine'})
 
-    def test_synthesis_cannot_replace_the_validated_count_with_zero(self):
+    def test_scalar_count_remains_available_to_coordinator(self):
         result=self.execute({'operation':'count','filters':[{'field':'religion','value':'Muslim'}]})
-        with self.assertRaises(ValueError):
-            validate_count_answer('There are 0 Muslim voters.',[result.model_dump()])
-        validate_count_answer('There are 3 Muslim voters.',[result.model_dump()])
+        self.assertEqual(result.facts[0]['total'], 3)
 
-    def test_analytical_sql_must_keep_filters_even_inside_ctes(self):
-        assignment=task({'operation':'aggregate','filters':[{'field':'religion','value':'Muslim'}]})
-        with closing(data.open_sqlite('seat','voters.db')) as c:
-            check_query("WITH selected AS (SELECT * FROM voters v WHERE v.religion='Muslim') SELECT gender,COUNT(*) FROM selected GROUP BY gender",assignment,c,runner)
-            for sql in ["SELECT gender,COUNT(*) FROM voters GROUP BY gender", "SELECT COUNT(*) FROM voters WHERE religion='Muslim' OR gender='Male'", "SELECT COUNT(*) FROM voters WHERE religion='muslim'", "SELECT COUNT(*) FROM voters WHERE religion='Muslim' AND gender='Male'"]:
-                with self.assertRaisesRegex(ValueError,'retain every'):
-                    check_query(sql,assignment,c,runner)
-
-    def test_equivalent_religion_disjunction_preserves_region_and_counts(self):
-        assignment = task({'operation': 'compare', 'filters': [
-            {'field': 'region', 'value': 'East'},
-            {'field': 'religion', 'operator': 'in', 'values': ['Hindu', 'Muslim']}],
-            'group_by': ['religion']})
-        with closing(data.open_sqlite('seat', 'voters.db')) as c:
-            expected = [('Hindu', 1), ('Muslim', 2)]
-            for predicate in [
-                "religion IN ('Hindu','Muslim')",
-                "(religion='Hindu' OR religion='Muslim')",
-                "(('Muslim'=religion OR religion='Hindu') OR religion='Muslim')",
-            ]:
-                sql = "SELECT religion,COUNT(*) FROM voters WHERE region='East' AND " + predicate + " GROUP BY religion ORDER BY religion"
-                check_query(sql, assignment, c, runner)
-                self.assertEqual([tuple(row) for row in c.execute(sql)], expected)
-            for predicate in [
-                "region='East' OR religion IN ('Hindu','Muslim')",
-                "region='East' AND (religion='Hindu' OR gender='Male')",
-                "region='East' AND (religion='Hindu' OR religion='Muslim' OR religion='Other')",
-                "region='East' AND religion='Hindu'",
-                "region='East' AND (religion='hindu' OR religion='Muslim')",
-                "region='East' AND (religion='Hindu' OR religion IS NULL)",
-                "region='East' AND (religion='Hindu' OR religion='Muslim') AND gender='Male'",
-            ]:
-                with self.subTest(predicate=predicate), self.assertRaisesRegex(ValueError, 'retain every'):
-                    check_query('SELECT religion,COUNT(*) FROM voters WHERE ' + predicate + ' GROUP BY religion', assignment, c, runner)
-
-    def test_query_rejection_retains_failure_code(self):
+    def test_agent_sql_is_not_rejected_for_task_filter_shape(self):
         assignment = task({'operation': 'count', 'filters': [{'field': 'region', 'value': 'East'}]})
-        with patch.object(runner, 'gemini_chat', return_value=json.dumps({
-            'action': 'sql', 'sql': 'SELECT COUNT(*) AS total FROM voters'})):
+        replies = [{'action': 'sql', 'sql': 'SELECT COUNT(*) AS total FROM voters'},
+                   {'action': 'finish', 'status': 'complete'}]
+        with patch.object(runner, 'gemini_chat', side_effect=[json.dumps(reply) for reply in replies]):
             result = run_specialist(assignment, 'seat', {}, runner, {})
-        self.assertEqual(result.status, 'failed')
-        self.assertEqual(result.failure_code, 'query_validation_failed')
-        self.assertEqual(result.facts, [])
+        self.assertEqual(result.status, 'complete')
+        self.assertEqual(result.facts[0]['rows'], [[5]])
 
-    def test_successful_repair_clears_query_failure(self):
+    def test_agent_can_run_several_queries_before_finishing(self):
         assignment = task({'operation': 'count', 'filters': [{'field': 'region', 'value': 'East'}]})
         replies = [
             {'action': 'sql', 'sql': 'SELECT COUNT(*) AS total FROM voters'},
@@ -261,14 +212,56 @@ class VoterHarnessTests(unittest.TestCase):
             result = run_specialist(assignment, 'seat', {}, runner, {})
         self.assertEqual(result.status, 'complete')
         self.assertIsNone(result.failure_code)
-        self.assertEqual(result.facts[0]['total'], 3)
+        self.assertEqual([fact['rows'] for fact in result.facts], [[[5]], [[3]]])
 
-    def test_wrong_election_type_is_rejected(self):
-        assignment=SpecialistTask(task_id='h',agent='history',objective='2024 results',required_outputs=['leader'],acceptance_criteria=['2024 Lok Sabha'],history_request={'operation':'winner','year':2024,'election_type':'lok'})
-        with closing(sqlite3.connect(':memory:')) as c:
-            c.execute('CREATE TABLE form20_2022_vidhan(votes INTEGER)')
-            with self.assertRaisesRegex(ValueError,'wrong election'):
-                check_query('SELECT SUM(votes) FROM form20_2022_vidhan',assignment,c,runner)
+    def test_percentage_uses_all_voters_denominator_without_a_task_filter(self):
+        assignment = task({'operation': 'aggregate'})
+        replies = [
+            {'action': 'sql', 'sql': "SELECT COUNT(*) AS all_voters, SUM(CASE WHEN religion='Muslim' THEN 1 ELSE 0 END) AS muslim_voters FROM voters"},
+            {'action': 'finish', 'status': 'complete'},
+        ]
+        with patch.object(runner, 'gemini_chat', side_effect=[json.dumps(reply) for reply in replies]):
+            result = run_specialist(assignment, 'seat', {}, runner, {}, 'find total Muslim percentage')
+        self.assertEqual(result.status, 'complete')
+        self.assertEqual(result.facts[0]['columns'], ['all_voters', 'muslim_voters'])
+        self.assertEqual(result.facts[0]['rows'], [[5, 3]])
+
+    def test_agent_can_list_regions_with_distinct_and_blank_filter(self):
+        assignment = task({'operation': 'aggregate', 'group_by': ['region']})
+        replies = [
+            {'action': 'sql', 'sql': 'SELECT DISTINCT region FROM voters WHERE region IS NOT NULL ORDER BY region'},
+            {'action': 'finish', 'status': 'complete'},
+        ]
+        with patch.object(runner, 'gemini_chat', side_effect=[json.dumps(reply) for reply in replies]):
+            result = run_specialist(assignment, 'seat', {}, runner, {}, 'find all regions in voter list')
+        self.assertEqual(result.status, 'complete')
+        self.assertEqual(result.facts[0]['rows'], [['East'], ['West']])
+
+    def test_coordinator_preserves_percentage_answer(self):
+        assignment = task({'operation': 'aggregate'})
+        replies = [
+            {'action': 'delegate', 'tasks': [assignment.model_dump()]},
+            {'action': 'sql', 'sql': "SELECT COUNT(*) AS all_voters, SUM(CASE WHEN religion='Muslim' THEN 1 ELSE 0 END) AS muslim_voters FROM voters"},
+            {'action': 'finish', 'status': 'complete'},
+            {'action': 'finish', 'answer': '3 of 5 voter records are Muslim: 60%.', 'evidence_task_ids': ['v']},
+        ]
+        with patch.object(runner, 'gemini_chat', side_effect=[json.dumps(reply) for reply in replies]):
+            result = runner.run_local_agent('find total Muslim percentage', 'seat')
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(result['answer'], '3 of 5 voter records are Muslim: 60%.')
+
+    def test_failed_sql_retries_return_earlier_observations(self):
+        assignment = task({'operation': 'aggregate'})
+        replies = [
+            {'action': 'sql', 'sql': 'SELECT COUNT(*) AS all_voters FROM voters'},
+            {'action': 'sql', 'sql': 'SELECT missing_column FROM voters'},
+            {'action': 'sql', 'sql': 'SELECT missing_column FROM voters'},
+        ]
+        with patch.object(runner, 'gemini_chat', side_effect=[json.dumps(reply) for reply in replies]):
+            result = run_specialist(assignment, 'seat', {}, runner, {}, 'find total Muslim percentage')
+        self.assertEqual(result.status, 'partial')
+        self.assertEqual(result.facts[0]['rows'], [[5]])
+        self.assertTrue(any('missing_column' in error for error in result.errors))
 
     def test_provider_schema_hides_internal_helpers_but_legacy_tasks_parse(self):
         from agents.execution import provider_schema
@@ -315,7 +308,7 @@ class VoterHarnessTests(unittest.TestCase):
                  {'action':'finish','answer':'There are 5 voters.','evidence_task_ids':['v']}]
         with patch.object(runner,'gemini_chat',side_effect=with_specialist([json.dumps(r) for r in replies])):
             result=runner.run_local_agent('How many voters?','seat',voter_context=context)
-        self.assertEqual(result['answer'],'There are 5 matching voter records in the available data.')
+        self.assertEqual(result['answer'],'There are 5 voters.')
         self.assertEqual(result['status'],'complete')
 
     def test_per_turn_diagnostics_survive_later_turns_and_are_bounded(self):

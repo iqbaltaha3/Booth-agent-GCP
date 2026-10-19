@@ -17,7 +17,7 @@ def specialist_reply(messages):
     observations = payload["observations"]
     request = task.get("voter_request") or {}
     predicate = (payload.get("resolved_population") or {}).get(
-        "mandatory_base_predicate", "1=1"
+        "suggested_population_predicate", "1=1"
     )
     if not observations:
         return json.dumps(

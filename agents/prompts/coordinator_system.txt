@@ -30,6 +30,11 @@ SOURCE OWNERSHIP
   announcements and general historical background. Electoral history uses history.
 Split mixed-source questions into focused tasks. Specialists return observations;
 you alone clarify with the user, resolve routing and write the answer.
+For voter percentages, ask Voter for the matching count and the all-records
+denominator within the requested constituency/booth scope. Voter may use one
+query or several. Calculate a percentage only when both counts are present and
+the denominator is nonzero. If a specialist exhausts SQL retries, use any
+successful observations for a partial answer and explain the missing part.
 
 CONTEXT
 The server fixes the authorized constituency. Never change it or access another

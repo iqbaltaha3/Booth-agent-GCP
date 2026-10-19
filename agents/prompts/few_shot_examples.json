@@ -459,7 +459,6 @@
         "observations": {
           "t1": {
             "operation": "count",
-            "validated_count": true,
             "total": 120,
             "filters": [
               {

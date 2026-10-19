@@ -200,7 +200,7 @@ class HarnessTests(unittest.TestCase):
             response = runner.run_local_agent("Top regions where BJP was ahead in 2024", "allahabad-south")
         self.assertEqual(response["status"], "partial")
         self.assertNotIn("Booth 1", response["answer"])
-        self.assertTrue(any(event.get("event") == "coordinator_rejected" for event in response["diagnostics"]))
+        self.assertIn("did not establish", response["answer"])
 
     def test_invalid_rankings_are_rejected(self):
         for rows in ([["A", 100, "B", 90, 50]], [["A", 200, "B", 150, 50], ["C", 400, "D", 100, 300]],
@@ -272,7 +272,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(infer_requirements("history of this constituency").intent, "public_history")
         self.assertEqual(infer_requirements("history of election results").intent, "electoral_history")
 
-    def test_specialist_repairs_its_own_invalid_ranking(self):
+    def test_specialist_returns_executed_ranking_for_coordinator_to_assess(self):
         req, assignment, _ = self.ranking()
         with tempfile.TemporaryDirectory() as root:
             seat = Path(root) / "seat"
@@ -281,13 +281,12 @@ class HarnessTests(unittest.TestCase):
                 connection.execute("CREATE TABLE form20_2024_lok(area TEXT, votes INTEGER)")
                 connection.execute("INSERT INTO form20_2024_lok VALUES('North',400)")
             invalid = "SELECT area AS geography_name,votes AS party_votes,'Opponent' AS opponent_name,100 AS opponent_votes,999 AS margin FROM form20_2024_lok"
-            valid = invalid.replace("999 AS margin", "300 AS margin")
-            replies = [action("sql", sql=invalid), action("finish"), action("sql", sql=valid), action("finish")]
+            replies = [action("sql", sql=invalid), action("finish")]
             with patch.object(get_settings(), "local_data_root", root), patch.object(runner, "gemini_chat", side_effect=replies) as model:
                 result = sql_specialist(assignment, "seat", {}, runner)
             self.assertEqual(result.status, "complete")
-            self.assertEqual(result.facts[-1]["rows"][0][-1], 300)
-            self.assertIn("must equal", model.call_args_list[2].args[0][1]["content"])
+            self.assertEqual(result.facts[-1]["rows"][0][-1], 999)
+            self.assertEqual(model.call_count, 2)
 
     def test_expired_deadline_interrupts_sql(self):
         with closing(sqlite3.connect(":memory:")) as connection, execution.execution_scope(-1):

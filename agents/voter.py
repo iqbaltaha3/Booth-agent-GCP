@@ -6,7 +6,6 @@ answer-query execution path.
 """
 
 import json
-import re
 import unicodedata
 from contextlib import closing
 
@@ -172,8 +171,6 @@ def prepare_voter_request(task, slug, data, context):
                     request.filters.append(VoterFilter(field=field, value=value))
     if len(request.filters) > 12:
         raise ValueError('The resolved population exceeds the filter budget; simplify the assignment without losing requirements')
-    if request.operation in {'count', 'lookup'} and request.group_by:
-        raise ValueError('Grouped results require operation=aggregate, not a single count/lookup')
     task.voter_request = request
     if request.operation == 'household':
         if request.filters or request.any_of or request.person or request.relative or request.booth:
@@ -204,7 +201,7 @@ def prepare_voter_request(task, slug, data, context):
 def sql_population(task, slug, conn, runner):
     """Resolve scope for validation and context; the agent writes the actual SELECT."""
     from agents.name_matching import name_matches, variants_for
-    from agents.query_validation import literal_filters
+    from agents.sql_observations import literal_filters
     request = task.voter_request
     where, params, resolved = compile_filters(conn, population_filters(request, slug, runner.gcs_data), runner)
     if request.any_of:
@@ -239,8 +236,8 @@ def sql_population(task, slug, conn, runner):
     return compiled, {'filters': resolved, 'any_of': [item for _, _, items in alternatives for item in items] if request.any_of else [],
         'person': request.person, 'relative': request.relative, 'match_mode': request.match_mode,
         'searched_name_variants': searched_name_variants,
-        'mandatory_base_predicate': literal_filters(conn, where, params),
-        'instruction': 'Write your own SELECT. This predicate describes required population scope for validation, not a prewritten answer query.'}
+        'suggested_population_predicate': literal_filters(conn, where, params),
+        'instruction': 'Write your own SELECT. This predicate is a scope hint; use the original question and database observations to plan numerator and denominator queries.'}
 
 
 def population_filters(request, slug, data):
@@ -342,13 +339,3 @@ def rehydrate_selected_voter(slug, data, context):
         "limitations": [],
         "gaps": [],
     }
-
-
-def validate_count_answer(answer, supported):
-    """For one canonical count, synthesis may not substitute another number."""
-    counts = [f['total'] for r in supported for f in r.get('facts', []) if f.get('validated_count')]
-    if len(counts) != 1:
-        return
-    numbers = [int(n.replace(',', '')) for n in re.findall(r'(?<![\w.])\d[\d,]*(?![\w.])', answer)]
-    if counts[0] not in numbers:
-        raise ValueError('The final count must use the validated total from the cited Voter result, not a prior answer or row count.')

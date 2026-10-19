@@ -23,15 +23,11 @@ from agents.contracts import (
     VoterFilter,
 )
 from agents import execution
-from agents.query_validation import QueryValidationError
 from agents.source_catalog import (
     voter_catalog,
-    validate_demographic_intent,
     CATALOG_VERSION,
 )
 from agents.provider_errors import ModelFailure, failure_kind, user_error
-from agents.count_answers import render_count
-from agents.contracts import CountEvidence
 from agents.elections import (
     electoral_request,
     election_catalog,
@@ -50,10 +46,10 @@ from agents.completion import (
     prepare_task,
     validate_clarification,
     validate_zero_claim,
-    whole_constituency,
-    source_policy,
     ranking_rows,
     render_ranking,
+    whole_constituency,
+    source_policy,
 )
 from agents.name_matching import resolve_booth, AmbiguousInput
 from agents.households import remember_voters, data_version
@@ -67,7 +63,6 @@ from agents.voter import (
     prepare_voter_request,
     sql_population,
     remember_population,
-    validate_count_answer,
     rehydrate_selected_voter,
 )
 
@@ -112,9 +107,19 @@ def sql_specialist(task, slug, meta, runner, question=""):
                 if task.agent == "history":
                     schema[-1]["row_count"] = conn.execute('SELECT COUNT(*) FROM "' + table.replace('"', '""') + '"').fetchone()[0]
             system = runner.load_prompt(f"{task.agent}_agent_system.txt", **meta)
-            compiled_filters, resolved_population = None, None
+            resolved_population = None
             if task.voter_request:
-                compiled_filters, resolved_population = sql_population(task, slug, conn, runner)
+                try:
+                    _, resolved_population = sql_population(task, slug, conn, runner)
+                except (ValueError, AmbiguousInput, ValidationError) as error:
+                    if isinstance(error, AmbiguousInput) and (
+                        task.voter_request.booth
+                        or any(f.field == 'polling_station' for f in task.voter_request.filters)
+                    ):
+                        raise
+                    # Label and scope resolution are useful context, not a gate on
+                    # the specialist's ability to inspect its own database.
+                    resolved_population = {"resolution_note": str(error)}
 
             memory = []
             last_correction = None
@@ -148,12 +153,7 @@ def sql_specialist(task, slug, meta, runner, question=""):
                             final_facts = [f for f in result.facts if f.get("source_id") in action.evidence_source_ids]
                         else:
                             final_facts = result.facts
-                        if task.answer_requirements and task.answer_requirements.intent == "election_ranking" and action.status == "complete" and not action.gaps:
-                            ranking_rows(task.answer_requirements, [{**result.model_dump(), "facts": final_facts}], {task.task_id: task.model_dump()})
                         result.facts = final_facts
-                        if task.voter_request and task.voter_request.operation == 'count' and action.status == 'complete':
-                            if not any(f.get('validated_count') for f in final_facts):
-                                raise ValueError('Count requests require a final executed ungrouped COUNT(*) AS total observation; label samples or record lists are insufficient.')
                         result.limitations.extend(action.limitations)
                         if any(f.get("truncated") for f in result.facts):
                             result.gaps.append("Some returned results are incomplete; they do not establish a full comparison or absence of matches.")
@@ -162,19 +162,10 @@ def sql_specialist(task, slug, meta, runner, question=""):
                         if not result.facts:
                             result.errors.append("Specialist finished without successful evidence.")
                         return result
-                    if task.voter_request or task.history_request:
-                        from agents.query_validation import check_query
-                        check_query(action.sql, task, conn, runner, compiled_filters)
                     observation = runner.gcs_data.execute_select(conn, action.sql)
                     if task.voter_request:
-                        from agents.query_validation import count_observation
+                        from agents.sql_observations import count_observation
                         observation = count_observation(action.sql, observation)
-                        if task.voter_request.operation == 'count' and observation.get('validated_count'):
-                            observation['count_scope'] = CountEvidence(total=observation['total'], constituency_id=slug,
-                                data_version=data_version(slug, runner.gcs_data),
-                                **{k: resolved_population[k] for k in ('filters', 'any_of', 'person', 'relative', 'match_mode')}).model_dump()
-                        if task.voter_request.operation != 'count':
-                            observation.pop('validated_count', None)
                         if task.voter_request.operation in {'lookup', 'household'} and 'epic_id' in observation.get('columns', []):
                             observation['records'] = [dict(zip(observation['columns'], row)) for row in observation['rows']]
                             if task.voter_request.operation == 'household':
@@ -189,7 +180,7 @@ def sql_specialist(task, slug, meta, runner, question=""):
                 except Exception as error:
                     # Corrections consume the same bounded specialist budget.
                     memory.append({"error": str(error)})
-                    result.failure_code = "query_validation_failed" if isinstance(error, QueryValidationError) else None
+                    result.failure_code = None
                     if str(error) == last_correction:
                         break
                     last_correction = str(error)
@@ -311,9 +302,6 @@ def run_specialist(task, slug, meta, runner, voter_context=None, question=""):
                 status="needs_clarification",
                 missing_inputs=[str(error)],
             )
-        validate_demographic_intent(
-            task.voter_request, question, voter_catalog(slug, runner.gcs_data)
-        )
         result = sql_specialist(task, slug, meta, runner, question)
         remember_population(task, result, slug, runner.gcs_data, context)
         return result
@@ -322,7 +310,7 @@ def run_specialist(task, slug, meta, runner, voter_context=None, question=""):
         return research_specialist(task, slug, meta, runner)
     if task.agent == "portfolio":
         return portfolio_specialist(task, slug, runner)
-    return sql_specialist(task, slug, meta, runner)
+    return sql_specialist(task, slug, meta, runner, question)
 
 
 class CoordinatorState(TypedDict, total=False):
@@ -670,7 +658,7 @@ class Coordinator:
             )
             if action.answer_kind == "conversation":
                 if re.search(
-                    "\\bhow many\\b|\\bcount\\b|कितने|कितनी|गिनती", self.question, re.I
+                    "\\bhow many\\b|\\bcount\\b|\\bpercent(?:age)?\\b|\\bshare\\b|कितने|कितनी|गिनती|प्रतिशत", self.question, re.I
                 ) or (
                     self.conversation
                     and re.search(
@@ -756,30 +744,6 @@ class Coordinator:
                     "A data answer needs evidence_task_ids with successful facts. Delegate the appropriate specialist now; do not repeat finish or ask the user to fix an internal assignment."
                 )
             validate_zero_claim(action.answer, supported)
-            validate_count_answer(action.answer, supported)
-            count_answer = render_count(
-                supported, self.runner.wants_hindi(self.question)
-            )
-            if count_answer:
-                action.answer = count_answer
-            ranking = None
-            if (
-                self.requirements.intent == "election_ranking"
-                and action.status != "failed"
-            ):
-                try:
-                    ranking = ranking_rows(self.requirements, supported, self.tasks)
-                except ValueError:
-                    if action.status != "partial" or not any(
-                        (r.get("gaps") for r in supported)
-                    ):
-                        raise
-                    action.answer = (
-                        "The requested ranking could not be established: "
-                        + "; ".join(
-                            (gap for r in supported for gap in r.get("gaps", []))
-                        )
-                    )
             if (
                 self.requirements.intent == "public_history"
                 and action.status == "complete"
@@ -882,24 +846,17 @@ class Coordinator:
                 (r["status"] != "complete" or r.get("gaps") for r in supported)
             ):
                 status = "partial"
-            if ranking:
-                action.answer = render_ranking(
-                    ranking,
-                    self.requirements,
-                    self.meta["name"],
-                    self.runner.wants_hindi(self.question),
-                )
-                caveats = list(
-                    dict.fromkeys(
-                        (
-                            gap
-                            for r in supported
-                            for gap in r.get("gaps", []) + r.get("limitations", [])
-                        )
+            if self.requirements.intent == "election_ranking" and status != "failed":
+                try:
+                    rows = ranking_rows(self.requirements, supported, self.tasks)
+                except ValueError:
+                    status = "partial"
+                    action.answer = "The returned election results did not establish the requested ranking."
+                else:
+                    action.answer = render_ranking(
+                        rows, self.requirements, self.meta["name"],
+                        self.runner.wants_hindi(self.question),
                     )
-                )
-                if caveats:
-                    action.answer += "\n" + "; ".join(caveats)
             if supported:
                 if (
                     any((r.get("task_id") == "_verified_person" for r in supported))
@@ -914,12 +871,9 @@ class Coordinator:
                         self.runner.wants_hindi(self.question),
                     )
                 self.working["last_objective"] = self.objective[:500]
-                if ranking:
+                if self.requirements.intent == "election_ranking":
                     self.working.update(
-                        {
-                            "year": self.requirements.year,
-                            "geography": self.requirements.geography,
-                        }
+                        {"year": self.requirements.year, "geography": self.requirements.geography}
                     )
             verified_booths = [
                 f.get("resolved_booth")
@@ -1079,11 +1033,6 @@ class Coordinator:
                 "errors": result.errors,
                 "missing_inputs": result.missing_inputs,
                 "failure_code": result.failure_code,
-                "resolved_scopes": [
-                    fact["count_scope"]
-                    for fact in result.facts
-                    if "count_scope" in fact
-                ],
                 "counts": [
                     fact.get("total", fact.get("row_count"))
                     for fact in result.facts
@@ -1164,29 +1113,28 @@ class Coordinator:
         usable = [
             r for r in self.results.values() if r["status"] in {"complete", "partial"}
         ]
+        sql_results = [r for r in usable if r["agent"] in {"voter", "history"}]
         if self.requirements.intent == "election_ranking":
             try:
-                rows = ranking_rows(self.requirements, usable, self.tasks)
-                answer = render_ranking(
-                    rows,
-                    self.requirements,
-                    self.meta["name"],
-                    self.runner.wants_hindi(self.question),
-                )
-                self.working.update(
-                    {
-                        "year": self.requirements.year,
-                        "geography": self.requirements.geography,
-                    }
-                )
-                answer += "\n" + (
-                    "यह सत्यापित आंशिक उत्तर है।"
-                    if self.runner.wants_hindi(self.question)
-                    else "This is a verified partial answer from the available results."
-                )
-                return self.response(answer, "partial")
+                rows = ranking_rows(self.requirements, sql_results, self.tasks)
             except ValueError:
                 pass
+            else:
+                answer = render_ranking(rows, self.requirements, self.meta["name"], self.runner.wants_hindi(self.question))
+                return self.response(answer + "\nThis is a verified partial answer from the available results.", "partial")
+        if sql_results:
+            lines = ["The database returned these partial results:"]
+            for result in sql_results[-3:]:
+                for fact in result["facts"][-2:]:
+                    columns, rows = fact.get("columns", []), fact.get("rows", [])
+                    if columns and rows:
+                        lines.append(dump({"columns": columns, "rows": rows[:10]}))
+                    if fact.get("truncated"):
+                        lines.append("Additional rows were omitted.")
+                lines.extend(result.get("gaps", [])[:2])
+                lines.extend(result.get("errors", [])[-1:])
+            lines.append("A complete answer could not be established from this attempt.")
+            return self.response("\n".join(lines), "partial")
         sources = {
             s["source_id"]: s
             for r in usable
@@ -1241,9 +1189,6 @@ class Coordinator:
         if self.terminal == "deadline_exceeded" or "deadline_exceeded" in codes:
             self.terminal = "deadline_exceeded"
             answer = "The request reached its time limit before a verified answer was ready. Please retry."
-        elif "query_validation_failed" in codes:
-            self.terminal = "query_validation_failed"
-            answer = "I could not validate the generated query against the requested filters and source. No complete answer was verified."
         elif self.results and all(
             (r["status"] == "failed" for r in self.results.values())
         ):
@@ -1278,7 +1223,16 @@ class Coordinator:
                 answer = "The records needed for this request are currently unavailable for the selected constituency."
                 self.terminal = "data_unavailable"
             else:
-                answer = "The analysis attempts ended without verified query results. Please retry; the request ID can be used to investigate this failure."
+                details = [error for result in self.results.values() for error in result.get("errors", [])]
+                reason = details[-1].lower() if details else ""
+                if "no such column" in reason:
+                    answer = "The query used a column unavailable in the selected database after repeated attempts."
+                elif "no such table" in reason:
+                    answer = "The query used a table unavailable in the selected database after repeated attempts."
+                elif "syntax error" in reason:
+                    answer = "The SQL had a syntax error after repeated attempts."
+                else:
+                    answer = "The analysis attempts ended without query results. Please retry."
         elif self.results:
             answer = ("The generated answer repeatedly failed verification against the available evidence."
                       if self.terminal == "repeated_invalid_action" else
@@ -1289,7 +1243,6 @@ class Coordinator:
                       "The analysis reached its step limit without producing verified results.")
         if self.runner.wants_hindi(self.question):
             answer = {
-                "query_validation_failed": "तैयार की गई क्वेरी का अनुरोधित फ़िल्टर और स्रोत से मिलान सत्यापित नहीं हो पाया। पूरा उत्तर सत्यापित नहीं हुआ।",
                 "deadline_exceeded": "सत्यापित उत्तर तैयार होने से पहले समय सीमा समाप्त हो गई। कृपया दोबारा प्रयास करें।",
                 "repeated_invalid_action": "तैयार किए गए उत्तर या कार्रवाई का बार-बार सत्यापन विफल हुआ।",
                 "turn_limit": "पूरा उत्तर सत्यापित होने से पहले विश्लेषण की चरण सीमा समाप्त हो गई।",

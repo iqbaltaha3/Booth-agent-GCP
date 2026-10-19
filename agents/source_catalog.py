@@ -1,6 +1,5 @@
 """Seat-specific schema/labels and reviewed equivalences, never inferred traits."""
 import copy
-import re
 import unicodedata
 from collections import OrderedDict
 from contextlib import closing
@@ -109,42 +108,3 @@ def voter_catalog(slug, data):
         return {**result, "coverage": coverage}
     except (FileNotFoundError, OSError):
         return {"constituency_id": slug, "available": False, "reason": "voter source unavailable"}
-
-
-def mentions(text, phrase):
-    # Unicode marks are not all regex word characters; explicit token boundaries
-    # avoid matching पुरुष inside other words or Male inside Female.
-    text, phrase = normalized(text), normalized(phrase)
-    return bool(phrase and re.search(r"(?<![\w\u0900-\u097f])" + re.escape(phrase) + r"(?![\w\u0900-\u097f])", text))
-
-
-def validate_demographic_intent(request, question, catalog):
-    """Catch known category substitutions before execution; never classify names."""
-    if not question or request.person or request.relative or request.operation == "household":
-        return
-    filters = list(request.filters) + list(request.any_of)
-    for field in ("caste", "social_category", "religion"):
-        inventory = catalog.get("labels", {}).get(field, {}).get("values", [])
-        for label in inventory:
-            if normalized(label) in {"undetermined", "unknown", "", "general"}:
-                continue
-            variants = equivalents(field, label)
-            if not any(mentions(question, v) for v in variants):
-                continue
-            if not any(f.field == field and any(normalized(v) in variants for v in (f.values or [f.value])) for f in filters):
-                raise ValueError(f'Intent mismatch: the question names {field}={label}. Preserve that field and label in the assignment; do not replace it with a broader/related category.')
-
-    # Check the reverse direction too: a coordinator must not silently turn an
-    # unrecognized word into a known demographic label before the resolver sees it.
-    # Refined populations already have verified inherited filters.
-    if request.population_mode == "new" and request.operation == "count":
-        for predicate in filters:
-            if predicate.field not in {"caste", "social_category", "religion"} or predicate.operator == "is_null":
-                continue
-            for value in predicate.values or [predicate.value]:
-                if not any(mentions(question, v) for v in equivalents(predicate.field, value)):
-                    raise ValueError(
-                        f'Unconfirmed demographic label: {predicate.field}={value} is not an exact/reviewed equivalent of the user wording. '
-                        'Preserve the literal requested term for resolution, or ask the user to confirm the intended stored label. '
-                        'Do not silently correct a typo or translate an unreviewed label. Use refine only for a verified previous population.'
-                    )
