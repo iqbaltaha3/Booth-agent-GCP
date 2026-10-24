@@ -34,6 +34,20 @@ GUIDANCE
 - Caste may be Hindi; use sample values or DISTINCT.
 - Write SQL for EVERY request, including simple counts, person lookup and households.
   There is no separate answer-query builder or name/household execution route.
+- Derived text filters are supported SQL analysis even when they are absent from
+  voter_request.filters. Preserve conditions in the objective, acceptance_criteria
+  and original_question in addition to the suggested population predicate.
+  The registered SQLite function word_count(column) counts whitespace-separated
+  words, including repeated spaces, tabs and Unicode whitespace; NULL/blank = 0.
+  Use word_count(relative_name)=4 for exactly four words, >2 for more than two,
+  >3 for more than three; word_count(name) works for voters' own names too.
+  A father-name condition also requires the exact stored Father relation_type
+  label; a generic relative-name condition does not restrict relationship type.
+  For example, after checking the stored label, a lookup may use SELECT name,
+  relative_name, relation_type, epic_id FROM voters WHERE relation_type='Father'
+  AND word_count(relative_name)=4 ORDER BY epic_id LIMIT 80. Obtain COUNT(*) AS
+  total with the same conditions when reporting the full number of matches.
+  Do not treat a word-count phrase as a literal person/relative name or refuse it.
 - Name matching may use the registered SQLite function
   name_matches(name, 'ताहा इकबाल', 'word') = 1. It normalizes name tokens;
   word matches contiguous whole words, full matches the full name, substring is
@@ -52,6 +66,20 @@ GUIDANCE
   the returned row_count. Resolve complete counts separately from displayed lists.
 - If observations are truncated, obtain an untruncated aggregate before claiming
   no matches. If that cannot be done, report a gap, not a zero.
+- A truncated DISTINCT list is only one page. Use the supplied next_page_offset
+  with the same SELECT DISTINCT and stable ORDER BY, adding LIMIT -1 OFFSET n.
+  Continue until a page has fewer than 80 rows. Keep every page as final
+  evidence; repeating the same SQL never advances the list.
+- For a requested percentage threshold by region or booth, compute the matching
+  religion count and the all-voter count for each group. Apply the strict
+  threshold to those counts and return a complete grouped result with both
+  counts in every row. A pair of truncated count lists cannot establish the
+  filtered answer. You may plan with exploratory queries, then execute a final
+  grouped SELECT that covers all groups before finishing. For example, group
+  by region and return SUM(CASE WHEN religion='Muslim' THEN 1 ELSE 0 END) AS
+  muslim_count alongside COUNT(*) AS total_count; use HAVING to restrict the
+  ratio. Do not put religion='Muslim' in the main WHERE clause, which would
+  shrink the denominator.
 - On finish, set evidence_source_ids to the final answer observations. Exclude
   exploratory label samples and preliminary record dumps; they are not totals.
 - Never invent region labels the user did not imply.
@@ -65,11 +93,14 @@ repair / finish loop, including household and individual lookups. Inspect the li
 schema and exact category labels. Backend scope resolution and validation are
 checks, not a substitute for writing your SELECT.
 
-resolved_population.mandatory_base_predicate describes the required population.
-Retain it on each base voter scan. Use a filtered base CTE for complex analytics;
-write all projections, aggregates, joins and window logic yourself. Do not add or
-silently remove population restrictions. filters are AND; any_of is a parenthesized
-OR group across fields, ANDed with filters and the booth. For an explicit Rajput +
+resolved_population gives suggested exact stored labels and scope when available.
+If resolution_note is present, inspect the live data yourself and decide whether
+to query, correct the scope, or ask for clarification. Write all projections,
+aggregates, joins and window logic yourself. Preserve the user's intended
+population. For percentages, include an unfiltered denominator covering all
+relevant voter records; a filter for the numerator must not restrict that
+denominator. filters are AND; any_of is a parenthesized OR group across fields,
+ANDed with filters and the booth. For an explicit Rajput +
 Yadav + Muslim request, use caste IN (resolved Rajput,Yadav labels) OR religion =
 resolved Muslim label, inside the booth restriction. If SC is requested include its
 social_category alternative too. Return separate requested group counts and a
@@ -81,11 +112,18 @@ never use row_count, a limited list, a constant, COUNT(name), or model arithmeti
 For lookup/household, execute a full-source COUNT(*) AS total separately if a total
 is needed, then your own bounded record SELECT including epic_id for references.
 Use supplied verified household house/station scope; do not retain the anchor's
-name as a household filter. Excluding an anchor must keep NULL EPIC records.
+name as a household filter. For "total voters in the same household", count all
+rows with the exact supplied house_no AND polling_station, INCLUDING the anchor.
+Do not add epic_id != anchor for a total; exclude the anchor only when
+exclude_anchor=true or the user explicitly asks for "other" voters. A count-only
+question needs COUNT(*), not a record listing. Excluding an anchor must keep NULL
+EPIC records.
 Never invent a previous person's address or identity.
 
-On finish select final evidence_source_ids, excluding exploratory samples. Unknown
-labels or ambiguous station mappings require clarification, not an invented zero.
+On finish select final evidence_source_ids, excluding exploratory samples. If
+some SQL attempts fail, return successful results with gaps and limitations.
+Unknown labels or ambiguous station mappings require clarification, not an
+invented zero.
 
 SOURCE CATALOG
 Use the seat-specific source_catalog and original_question as well as the task.

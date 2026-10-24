@@ -26,7 +26,7 @@ def firebase_app():
 
 def get_current_user(authorization: str | None = Header(None)) -> dict:
     """Read the Bearer token; allow header-free access only in local mode."""
-    if get_settings().agent_local_mode and not authorization:
+    if get_settings().local_dev_auth and not authorization:
         return {"uid": "local-dev", "email": "dev@localhost", "role": "admin", "constituency_slugs": ["*"]}
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "Missing or invalid Authorization header")

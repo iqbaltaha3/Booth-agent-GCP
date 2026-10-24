@@ -1,56 +1,35 @@
-# Backend walkthrough
+# Backend
 
-The backend receives website requests, checks access, and reads the chosen constituency's data.
+FastAPI validates authentication, constituency access and request contracts. Chat
+calls the LangGraph harness through `app/services/agent.py`; Gemini calls use
+LangChain through `agents/model.py`. There is one agent runtime in local and cloud
+environments.
 
 ```text
-app/
-  main.py       Creates FastAPI and registers routes
-  config.py     Reads environment settings
-  auth.py       Verifies login and constituency access
-  models.py     Validates API inputs and outputs
-  routes/       account, chat, elections, booths, voice
-  services/     data, agent, speech, SQL validation
+app/main.py          API registration
+app/config.py        Environment settings
+app/auth.py          Firebase authentication and constituency access
+app/models.py        API contracts
+app/routes/          Account, chat, election data, booths and voice
+app/services/        Data access, sessions, agent entry point and speech
 ```
 
-## Explain a request in an interview
+See the [root README](../README.md) for setup, environment variables, data layout,
+Firestore prerequisites and test commands. Development dependencies are in
+`requirements-dev.txt`; production ranges are in `requirements.txt` and deployment versions are pinned in
+`requirements.lock`.
 
-1. FastAPI matches the URL to a function in `routes/`.
-2. `auth.py` verifies the Firebase token and constituency permissions.
-3. Pydantic models check the request fields.
-4. The route calls a service to read data or contact an AI provider.
-5. FastAPI returns the response in the existing website format.
+Authentication defaults to required. For local development only, explicitly set
+`LOCAL_DEV_AUTH=true`. This setting does not change the agent runtime. Cloud Run
+configurations currently set `LOCAL_DEV_AUTH=true` for the demo frontend. This
+allows header-free access to all constituency and voter endpoints until Firebase
+sign-in is configured in the frontend.
 
-For example, `/voter/query` checks access, opens `voters.db` read-only, validates the SQL, returns a limited number of rows, and closes the connection. `/history/query` reuses that flow for `history.db`.
+`services/data.py` is the shared data implementation. Data access uses a
+seat-specific folder and read-only SQLite;
+cloud downloads are cached for the process lifetime, so restart after replacing
+artifacts. Coverage metadata controls whether missing data is available to agents.
 
-`services/gcs_data.py` is a small compatibility module for `agents/local_runner.py`. The implementation lives in `services/data.py`.
-
-## Local setup
-
-From the repository root, install `backend/requirements.txt` in your virtual environment, then run:
-
-```sh
-export PYTHONPATH="$PWD/backend:$PWD"
-export LOCAL_DATA_ROOT="$PWD/legacy-data"
-export AGENT_LOCAL_MODE=true
-uvicorn app.main:app --port 8080 --reload
-```
-
-Store each constituency under `legacy-data/<slug>/`. The backend no longer uses a shared flat data folder. The committed constituency manifest is required for the account endpoints.
-
-For cloud use, set `AGENT_LOCAL_MODE=false` to require login. Set `AGENT_ENGINE_RESOURCE_NAME` for the deployed engine; without it, chat still uses the local runner. Set `GCS_DATA_BUCKET` and Google application credentials for cloud storage. Firebase initialization failures now return an error instead of granting local access.
-
-Cloud file downloads are cached for the process lifetime; restart the service to read updated files. With `SESSION_STORE=auto`, Cloud Run uses Firestore for conversation history, pending tasks and verified voter references. Local runs use process memory. See the root README for database, IAM, expiry and configuration requirements. Storage failures do not fall back to empty local memory.
-
-Completed individual lookups can retain a selected voter reference. Household
-follow-ups resolve that reference against the current voter file and use the
-original address values. Display capitalization does not become a lookup key.
-
-## Verification
-
-Install `httpx` in the development environment for FastAPI's test client, then run from the repository root:
-
-```sh
-PYTHONPATH=backend:. python -m unittest discover -s backend/tests -v
-```
-
-Tests use temporary fake records and mocked AI/voice calls. They do not verify live Google or Sarvam services.
+The API session store owns user/seat isolation, clarification state, verified
+references and concurrency leases. LangGraph invocation state is private and is
+not returned through the public chat response.

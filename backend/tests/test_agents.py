@@ -1,4 +1,5 @@
-from backend.tests.sql_model_fixture import with_specialist
+from backend.tests.sql_model_fixture import with_specialist, run_voter_task
+
 """Behavioral agent checks with synthetic rolls and scripted model responses."""
 
 import json
@@ -11,7 +12,7 @@ from contextlib import closing
 
 from agents import local_runner as runner
 from agents.contracts import SpecialistTask, SpecialistResult
-from agents.name_matching import name_matches, run_name_task
+from agents.name_matching import name_matches
 from agents.runtime import sql_specialist, portfolio_specialist
 from app.config import get_settings
 
@@ -54,9 +55,9 @@ class AgentTests(unittest.TestCase):
         self.directory.cleanup()
 
     def name_result(self, query, candidates=None, **kwargs):
-        with patch.object(runner, "gemini_chat", return_value=json.dumps({"variants": candidates or ["श्याम"]})) as model:
-            result = run_name_task(task(name_query=query, **kwargs), "seat", runner.gcs_data, runner.gemini_chat, runner.safe_json)
-        return result, model
+        return run_voter_task(
+            task(name_query=query, **kwargs), "seat", runner, variants=candidates
+        )
 
     def test_word_boundaries_and_unicode(self):
         self.assertTrue(name_matches("श्‍याम कुमार", "श्याम", "word"))
@@ -64,27 +65,72 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(name_matches("श्यामलाल", "श्याम", "word"))
         self.assertFalse(name_matches("श्याम कुमार", "श्याम", "full"))
         self.assertTrue(name_matches("घनश्याम", "श्याम", "substring"))
+        self.assertTrue(name_matches("फ़हद इक़बाल", "फहद इकबाल", "word"))
 
     def test_count_scoped_to_booth_not_limited_records(self):
-        result, model = self.name_result({"operation": "count", "person": "Shyam", "booth": "2"})
+        result, model = self.name_result(
+            {"operation": "count", "person": "Shyam", "booth": "2"}
+        )
         self.assertEqual(result.status, "complete")
         self.assertEqual(result.facts[0]["total"], 3)
         self.assertNotIn("records", result.facts[0])
-        self.assertIn('"name": "Shyam"', model.call_args.args[0][1]["content"])
+        self.assertTrue(
+            any(
+                '"name": "Shyam"' in call.args[0][1]["content"]
+                for call in model.call_args_list
+            )
+        )
 
     def test_hindi_input_and_every_filter_preserved(self):
-        result, model = self.name_result({"operation": "count", "person": "श्याम", "relative": "राम लाल",
-                                           "booth": "Part_2", "filters": {"house_no": "5", "gender": "M"}})
+        result, model = self.name_result(
+            {
+                "operation": "count",
+                "person": "श्याम",
+                "relative": "राम लाल",
+                "booth": "Part_2",
+                "filters": {"house_no": "5", "gender": "M"},
+            }
+        )
         self.assertEqual(result.facts[0]["total"], 1)
-        model.assert_not_called()
+        self.assertTrue(
+            all(
+                call.kwargs.get("response_schema", {}).get("title") != "NameCandidates"
+                for call in model.call_args_list
+            )
+        )
 
-    def test_ambiguous_spellings_require_selection(self):
+    def test_transliteration_spellings_are_searched_together(self):
         query = {"operation": "count", "person": "Shyam", "booth": "School"}
         result, _ = self.name_result(query, ["श्याम", "शयाम"])
-        self.assertEqual(result.status, "needs_clarification")
-        self.assertNotIn("total", result.facts[0])
-        result, _ = self.name_result({**query, "confirmed_person_variants": ["श्याम", "शयाम"]})
+        self.assertEqual(result.status, "complete")
         self.assertEqual(result.facts[0]["total"], 4)  # OR alternatives, not AND
+
+    def test_fahad_iqbal_variants_find_the_stored_spelling(self):
+        path = Path(self.directory.name) / "seat" / "voters.db"
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute(
+                "INSERT INTO voters VALUES(?,?,?,?,?)",
+                ("फ़हाद इक़बाल", "मोहम्मद इक़बाल", "School", "8", "M"),
+            )
+        context = {"test": True}
+        result, _ = run_voter_task(
+            task(name_query={"operation": "lookup", "person": "Fahad Iqbal", "booth": "School"}),
+            "seat",
+            runner,
+            context=context,
+            variants=["फहद इकबाल", "फ़हद इक़बाल", "फहाद इकबाल", "फ़हाद इक़बाल"],
+        )
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.facts[0]["total"], 1)
+        self.assertIn("फहद इकबाल", result.sources[0]["sql"])
+        self.assertIn("फहाद इकबाल", result.sources[0]["sql"])
+        self.assertIn(" OR ", result.sources[0]["sql"])
+        self.assertEqual(
+            context["population"]["confirmed_person_variants"],
+            ["फहद इकबाल", "फहाद इकबाल"],
+        )
+        lookup = next(fact for fact in result.facts if "name" in fact.get("columns", []))
+        self.assertEqual(lookup["rows"][0][lookup["columns"].index("name")], "फ़हाद इक़बाल")
 
     def test_zero_matches_is_evidence(self):
         result, _ = self.name_result({"operation": "count", "person": "नरेश", "booth": "2"})
@@ -100,17 +146,37 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
 
     def test_full_name_alternatives_keep_words_together(self):
-        result, _ = self.name_result({"operation": "lookup", "person": "Shyam Kumar", "booth": "2"}, ["श्याम कुमार", "शयाम कुमार"])
+        result, _ = self.name_result(
+            {
+                "operation": "lookup",
+                "person": "Shyam Kumar",
+                "booth": "2",
+                "confirmed_person_variants": ["श्याम कुमार", "शयाम कुमार"],
+            }
+        )
         self.assertEqual(result.facts[0]["total"], 1)
-        self.assertEqual(result.facts[0]["records"][0]["name"], "श्याम कुमार")
+        self.assertEqual(
+            dict(zip(result.facts[1]["columns"], result.facts[1]["rows"][0]))["name"],
+            "श्याम कुमार",
+        )
 
-    def test_count_not_capped_at_lookup_limit(self):
-        with closing(sqlite3.connect(Path(self.directory.name) / "seat/voters.db")) as conn, conn:
-            conn.executemany("INSERT INTO voters VALUES(?,?,?,?,?)", [("श्याम", "राम", "School", "5", "M")] * 30)
-        result, _ = self.name_result({"operation": "lookup", "person": "श्याम", "booth": "2"})
-        self.assertEqual(result.facts[0]["total"], 33)
-        self.assertEqual(len(result.facts[0]["records"]), 20)
-        self.assertTrue(result.facts[0]["truncated"])
+    def test_total_not_capped_when_lookup_rows_are_truncated(self):
+        with (
+            closing(
+                sqlite3.connect(Path(self.directory.name) / "seat/voters.db")
+            ) as conn,
+            conn,
+        ):
+            conn.executemany(
+                "INSERT INTO voters VALUES(?,?,?,?,?)",
+                [("श्याम", "राम", "School", "5", "M")] * 100,
+            )
+        result, _ = self.name_result(
+            {"operation": "lookup", "person": "श्याम", "booth": "2"}
+        )
+        self.assertEqual(result.facts[0]["total"], 103)
+        self.assertEqual(len(result.facts[1]["rows"]), 80)
+        self.assertTrue(result.facts[1]["truncated"])
 
     def test_specialist_corrects_error_and_returns_actual_rows(self):
         replies = [
@@ -188,18 +254,14 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result["agent_path"], ["voter_agent"])
         self.assertIn('"total": 3', model.call_args.args[0][1]["content"])
 
-    def test_ambiguous_name_task_resumes_with_user_selected_spellings(self):
+    def test_coordinator_does_not_ask_user_to_choose_roll_spelling(self):
         assignment = task(name_query={"operation": "count", "person": "Shyam", "booth": "2"})
-        with patch.object(runner, "gemini_chat", side_effect=with_specialist([delegate(assignment), '{"variants":["श्याम","शयाम"]}',
-                         '{"action":"clarify","answer":"Should I include श्याम, शयाम, or both?"}'])):
-            initial = runner.run_local_agent("How many Shyam in booth 2?", "seat", "sid")
-        self.assertEqual(initial["status"], "needs_clarification")
-        assignment.name_query.confirmed_person_variants = ["श्याम", "शयाम"]
-        with patch.object(runner, "gemini_chat", side_effect=with_specialist([delegate(assignment),
-                         '{"action":"finish","answer":"4 voters match the two spellings at booth 2.","evidence_task_ids":["t1"]}'])) as model:
-            result = runner.run_local_agent("Both", "seat", "sid", pending_state=initial["pending_state"])
+        replies = [delegate(assignment), '{"variants":["श्याम","शयाम"]}',
+                   '{"action":"finish","answer":"4 voters match the name at booth 2.","evidence_task_ids":["t1"]}']
+        with patch.object(runner, "gemini_chat", side_effect=with_specialist(replies)) as model:
+            result = runner.run_local_agent("How many Shyam in booth 2?", "seat", "sid")
         self.assertEqual(result["status"], "complete")
-        self.assertEqual(model.call_count, 4)  # SQL, specialist finish and two coordinator calls; no transliteration.
+        self.assertEqual(model.call_count, 5)  # Coordinator, transliteration, SQL, specialist finish, coordinator.
         self.assertIn('"total": 4', model.call_args.args[0][1]["content"])
 
     def test_failed_evidence_can_finish_with_explicit_failure(self):
@@ -224,15 +286,22 @@ class AgentTests(unittest.TestCase):
         result = portfolio_specialist(task("portfolio", constraints={"booth": "2"}), "seat", runner)
         self.assertEqual(result.status, "needs_clarification")
 
-    def test_coordinator_cannot_finish_over_pending_spelling_ambiguity(self):
-        assignment = task(name_query={"operation": "count", "person": "Shyam", "booth": "2"})
-        observation = SpecialistResult(task_id="t1", agent="voter", status="needs_clarification", facts=[{"candidate_spellings": ["श्याम", "शयाम"]}], missing_inputs=["Which spelling?"])
-        replies = [delegate(assignment), '{"action":"finish","answer":"4 voters.","evidence_task_ids":["t1"]}',
-                   '{"action":"clarify","answer":"Which spelling should I include?"}']
+    def test_coordinator_clarifies_multiple_actual_voters_not_spellings(self):
+        assignment = task(voter_request={"operation": "lookup", "person": "Shyam", "booth": "2"})
+        observation = SpecialistResult(task_id="t1", agent="voter", status="complete", facts=[{
+            "total": 2,
+            "voter_references": [
+                {"reference": "ref-a", "name": "श्याम", "polling_station": "School"},
+                {"reference": "ref-b", "name": "श्याम कुमार", "polling_station": "School"},
+            ],
+        }])
+        replies = [delegate(assignment), '{"action":"finish","answer":"I found two records.","evidence_task_ids":["t1"]}',
+                   '{"action":"clarify","answer":"I found two matching voter records. Which record do you mean: श्याम or श्याम कुमार?"}']
         with patch.object(runner, "gemini_chat", side_effect=replies), patch("agents.runtime.run_specialist", return_value=observation):
-            result = runner.run_local_agent("Count Shyam", "seat")
+            result = runner.run_local_agent("Find Shyam", "seat")
         self.assertEqual(result["status"], "needs_clarification")
-        self.assertNotIn("4 voters", result["answer"])
+        self.assertIn("two matching voter records", result["answer"])
+        self.assertNotIn("spelling", result["answer"])
 
     def test_coordinator_has_a_total_specialist_call_budget(self):
         counter = 0
@@ -250,7 +319,8 @@ class AgentTests(unittest.TestCase):
         with patch.object(runner, "gemini_chat", side_effect=next_plan), patch("agents.runtime.run_specialist", side_effect=observe) as specialist:
             result = runner.run_local_agent("Count voters", "seat")
         self.assertEqual(specialist.call_count, 8)
-        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["status"], "needs_clarification")
+        self.assertNotIn("total", result["answer"].casefold())
 
 
 if __name__ == "__main__":

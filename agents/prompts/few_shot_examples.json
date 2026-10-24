@@ -1,6 +1,22 @@
 {
   "coordinator_system.txt": [
     {
+      "input": {"question": "find people whos father name has 4 words"},
+      "output": {
+        "action": "delegate",
+        "answer_kind": "data",
+        "objective_mode": "new",
+        "tasks": [{
+          "task_id": "v_words",
+          "agent": "voter",
+          "objective": "Find voter records whose stored father's name has exactly four whitespace-separated words.",
+          "required_outputs": ["Bounded matching voter list and full matching count"],
+          "acceptance_criteria": ["Filter relation_type to the exact stored Father label and word_count(relative_name)=4", "Count all matches separately from the bounded list; include epic_id for references"],
+          "voter_request": {"operation": "lookup", "population_mode": "new", "filters": [{"field": "relation_type", "value": "Father"}]}
+        }]
+      }
+    },
+    {
       "input": {
         "question": "In XYZ school find Taha Iqbal",
         "specialist_observation": {
@@ -459,7 +475,6 @@
         "observations": {
           "t1": {
             "operation": "count",
-            "validated_count": true,
             "total": 120,
             "filters": [
               {

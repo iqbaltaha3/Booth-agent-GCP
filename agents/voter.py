@@ -4,14 +4,17 @@ All live answer queries are written by the SQL specialist. Helpers here resolve
 source labels, verified references and validation scope; they do not choose an
 answer-query execution path.
 """
-import copy
+
 import json
-import re
 import unicodedata
 from contextlib import closing
 
 from pydantic import Field
-from agents.contracts import Contract, VoterFilter, NameQuery, HouseholdQuery, SpecialistResult
+from agents.contracts import (
+    Contract,
+    VoterFilter,
+    HouseholdQuery,
+)
 from agents.households import data_version, normalized_station
 from agents.name_matching import resolve_booth, AmbiguousInput
 from agents.station_matching import resolve_roll_station
@@ -168,8 +171,6 @@ def prepare_voter_request(task, slug, data, context):
                     request.filters.append(VoterFilter(field=field, value=value))
     if len(request.filters) > 12:
         raise ValueError('The resolved population exceeds the filter budget; simplify the assignment without losing requirements')
-    if request.operation in {'count', 'lookup'} and request.group_by:
-        raise ValueError('Grouped results require operation=aggregate, not a single count/lookup')
     task.voter_request = request
     if request.operation == 'household':
         if request.filters or request.any_of or request.person or request.relative or request.booth:
@@ -200,7 +201,7 @@ def prepare_voter_request(task, slug, data, context):
 def sql_population(task, slug, conn, runner):
     """Resolve scope for validation and context; the agent writes the actual SELECT."""
     from agents.name_matching import name_matches, variants_for
-    from agents.query_validation import literal_filters
+    from agents.sql_observations import literal_filters
     request = task.voter_request
     where, params, resolved = compile_filters(conn, population_filters(request, slug, runner.gcs_data), runner)
     if request.any_of:
@@ -209,13 +210,19 @@ def sql_population(task, slug, conn, runner):
         for _, values, _ in alternatives:
             params.extend(values)
     conn.create_function('name_matches', 3, name_matches, deterministic=True)
+    searched_name_variants = {}
     for column, phrase, confirmed in [('name', request.person, request.confirmed_person_variants),
                                       ('relative_name', request.relative, request.confirmed_relative_variants)]:
         if not phrase:
             continue
         variants = variants_for(phrase, confirmed, runner.gemini_chat, runner.safe_json)
-        if len(variants) > 1 and not confirmed:
-            raise AmbiguousInput('Please choose the name spelling(s) to include: ' + ', '.join(variants))
+        # These spellings represent the same requested name. Search their union;
+        # users cannot know which spelling the roll happens to contain.
+        searched_name_variants[column] = variants
+        if column == 'name':
+            request.confirmed_person_variants = list(variants)
+        else:
+            request.confirmed_relative_variants = list(variants)
         where += ' AND (' + ' OR '.join(f'name_matches("{column}", ?, ?) = 1' for _ in variants) + ')'
         for variant in variants:
             params.extend([variant, request.match_mode])
@@ -228,8 +235,9 @@ def sql_population(task, slug, conn, runner):
     compiled = where, params, resolved
     return compiled, {'filters': resolved, 'any_of': [item for _, _, items in alternatives for item in items] if request.any_of else [],
         'person': request.person, 'relative': request.relative, 'match_mode': request.match_mode,
-        'mandatory_base_predicate': literal_filters(conn, where, params),
-        'instruction': 'Write your own SELECT. This predicate describes required population scope for validation, not a prewritten answer query.'}
+        'searched_name_variants': searched_name_variants,
+        'suggested_population_predicate': literal_filters(conn, where, params),
+        'instruction': 'Write your own SELECT. This predicate is a scope hint; use the original question and database observations to plan numerator and denominator queries.'}
 
 
 def population_filters(request, slug, data):
@@ -246,42 +254,6 @@ def population_filters(request, slug, data):
                 raise ValueError('Conflicting booth and polling_station filters; resolve the geographic scope')
         filters.append(VoterFilter(field='polling_station', value=stations[0]))
     return filters
-
-
-def count_request(task, slug, runner):
-    result = SpecialistResult(task_id=task.task_id, agent='voter', status='failed')
-    try:
-        request = task.voter_request
-        filters = population_filters(request, slug, runner.gcs_data)
-        with closing(runner.gcs_data.open_sqlite(slug, 'voters.db')) as conn:
-            where, params, resolved = compile_filters(conn, filters, runner)
-            sql = 'SELECT COUNT(*) AS total FROM voters WHERE ' + where
-            total = conn.execute(sql, params).fetchone()[0]
-            records = None
-            if request.operation == 'lookup':
-                available = set(runner.gcs_data.list_columns(conn, 'voters'))
-                fields = [c for c in ('name', 'relative_name', 'relation_type', 'house_no', 'age', 'gender', 'epic_id', 'polling_station', 'region') if c in available]
-                select = ','.join('"' + c + '"' for c in fields)
-                rows = conn.execute(f'SELECT {select} FROM voters WHERE {where} ORDER BY {select} LIMIT 20', params).fetchall()
-                records = [dict(row) for row in rows]
-        sid = f'{task.task_id}:count'
-        result.status = 'complete'
-        result.facts = [{'source_id': sid, 'operation': request.operation, 'total': total,
-                         'filters': resolved, 'validated_count': request.operation == 'count'}]
-        if records is not None:
-            result.facts[0].update(records=records, truncated=total > 20)
-        result.sources = [{'source_id': sid, 'database': 'voters.db', 'sql': sql, 'parameters': params}]
-        if records is not None:
-            result.sources.append({'source_id': f'{task.task_id}:lookup', 'database': 'voters.db',
-                'sql': f'SELECT {select} FROM voters WHERE {where} ORDER BY {select} LIMIT 20', 'parameters': params})
-    except AmbiguousInput as error:
-        result.status = 'needs_clarification'
-        result.missing_inputs = [str(error)]
-    except Exception as error:
-        result.errors = [str(error)]
-        if isinstance(error, FileNotFoundError):
-            result.failure_code = 'data_unavailable'
-    return result
 
 
 def remember_population(task, result, slug, data, context):
@@ -301,33 +273,69 @@ def remember_population(task, result, slug, data, context):
 def rehydrate_selected_voter(slug, data, context):
     """Rehydrate a server-verified entity as current, citable Voter evidence.
 
-This prepares conversation context; it does not infer or choose a new person.
-No record is reused unless identity, constituency and source version still match.
-"""
-    reference = context.get('selected_reference')
-    saved = context.get('references', {}).get(reference)
-    if not saved or saved.get('constituency_id') != slug or saved.get('data_version') != data_version(slug, data):
+    This prepares conversation context; it does not infer or choose a new person.
+    No record is reused unless identity, constituency and source version still match.
+    """
+    reference = context.get("selected_reference")
+    saved = context.get("references", {}).get(reference)
+    if (
+        not saved
+        or saved.get("constituency_id") != slug
+        or saved.get("data_version") != data_version(slug, data)
+    ):
         return None
-    with closing(data.open_sqlite(slug, 'voters.db')) as conn:
-        available = set(data.list_columns(conn, 'voters'))
-        fields = [c for c in ('name', 'relative_name', 'house_no', 'age', 'gender', 'epic_id', 'polling_station') if c in available]
-        sql = 'SELECT ' + ','.join('"' + c + '"' for c in fields) + ' FROM voters WHERE epic_id = ?'
-        rows = conn.execute(sql, (saved['epic_id'],)).fetchmany(2)
+    with closing(data.open_sqlite(slug, "voters.db")) as conn:
+        available = set(data.list_columns(conn, "voters"))
+        fields = [
+            c
+            for c in (
+                "name",
+                "relative_name",
+                "house_no",
+                "age",
+                "gender",
+                "epic_id",
+                "polling_station",
+            )
+            if c in available
+        ]
+        sql = (
+            "SELECT "
+            + ",".join('"' + c + '"' for c in fields)
+            + " FROM voters WHERE epic_id = ?"
+        )
+        rows = conn.execute(sql, (saved["epic_id"],)).fetchmany(2)
     if len(rows) != 1:
         return None
-    return {'task_id': '_verified_person', 'agent': 'voter', 'status': 'complete',
-        'facts': [{'source_id': '_verified_person:q1', 'operation': 'lookup', 'records': [dict(rows[0])],
-                   'total': 1, 'verified_reference': reference,
-                   'voter_references': [{'reference': reference, 'name': dict(rows[0]).get('name'), 'polling_station': dict(rows[0]).get('polling_station')}]}],
-        'sources': [{'source_id': '_verified_person:q1', 'database': 'voters.db', 'data_version': saved['data_version'], 'sql': sql, 'parameters': [saved['epic_id']]}],
-        'limitations': [], 'gaps': []}
-
-
-def validate_count_answer(answer, supported):
-    """For one canonical count, synthesis may not substitute another number."""
-    counts = [f['total'] for r in supported for f in r.get('facts', []) if f.get('validated_count')]
-    if len(counts) != 1:
-        return
-    numbers = [int(n.replace(',', '')) for n in re.findall(r'(?<![\w.])\d[\d,]*(?![\w.])', answer)]
-    if counts[0] not in numbers:
-        raise ValueError('The final count must use the validated total from the cited Voter result, not a prior answer or row count.')
+    return {
+        "task_id": "_verified_person",
+        "agent": "voter",
+        "status": "complete",
+        "facts": [
+            {
+                "source_id": "_verified_person:q1",
+                "operation": "lookup",
+                "records": [dict(rows[0])],
+                "total": 1,
+                "verified_reference": reference,
+                "voter_references": [
+                    {
+                        "reference": reference,
+                        "name": dict(rows[0]).get("name"),
+                        "polling_station": dict(rows[0]).get("polling_station"),
+                    }
+                ],
+            }
+        ],
+        "sources": [
+            {
+                "source_id": "_verified_person:q1",
+                "database": "voters.db",
+                "data_version": saved["data_version"],
+                "sql": sql,
+                "parameters": [saved["epic_id"]],
+            }
+        ],
+        "limitations": [],
+        "gaps": [],
+    }

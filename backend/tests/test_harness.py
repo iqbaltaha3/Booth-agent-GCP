@@ -9,9 +9,24 @@ from contextlib import closing
 import unittest
 from unittest.mock import patch
 
-from agents import execution, local_runner as runner
-from agents.completion import infer_requirements, ranking_rows, resolve_requirements, render_ranking, validate_zero_claim, validate_clarification, source_policy
-from agents.contracts import AnswerRequirements, CoordinatorAction, SpecialistTask, SpecialistResult, WebResearchQuery
+from agents import execution, local_runner as runner, model as model_boundary
+from langchain_core.messages import AIMessage
+from agents.completion import (
+    infer_requirements,
+    ranking_rows,
+    resolve_requirements,
+    render_ranking,
+    validate_zero_claim,
+    validate_clarification,
+    source_policy,
+)
+from agents.contracts import (
+    AnswerRequirements,
+    CoordinatorAction,
+    SpecialistTask,
+    SpecialistResult,
+    WebResearchQuery,
+)
 from agents.runtime import compact_results
 from agents.runtime import sql_specialist
 from app.config import get_settings
@@ -61,33 +76,108 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             CoordinatorAction.model_validate({"action": "delegate", "tasks": [], "extra": 1})
 
-    def test_payload_includes_schema_separately(self):
-        payload = runner._to_gemini_payload([{"role": "system", "content": "Be concise"},
-            {"role": "user", "content": "Hello"}], 0, 1024, CoordinatorAction.model_json_schema())
-        self.assertIn("responseSchema", payload["generationConfig"])
-        self.assertEqual(payload["systemInstruction"]["parts"][0]["text"], "Be concise")
+    def test_langchain_binds_native_schema_and_preserves_system_message(self):
+        with patch.object(model_boundary, "ChatGoogleGenerativeAI") as factory:
+            factory.return_value.bind.return_value.invoke.return_value = AIMessage(
+                content="{}", response_metadata={"finish_reason": "STOP"}
+            )
+            value = model_boundary.chat(
+                [
+                    {"role": "system", "content": "Be concise"},
+                    {"role": "user", "content": "Hello"},
+                ],
+                response_schema=CoordinatorAction.model_json_schema(),
+            )
+        self.assertEqual(value, "{}")
+        self.assertEqual(
+            factory.return_value.bind.call_args.kwargs["response_schema"],
+            execution.provider_schema(CoordinatorAction.model_json_schema()),
+        )
+        self.assertEqual(
+            factory.return_value.bind.return_value.invoke.call_args.args[0][0].content,
+            "Be concise",
+        )
+        self.assertEqual(factory.call_args.kwargs["max_retries"], 0)
+
+    def test_real_langchain_adapter_builds_provider_request_without_network(self):
+        from google.genai import types
+
+        provider_response = types.GenerateContentResponse(
+            candidates=[
+                types.Candidate(
+                    content=types.Content(parts=[types.Part(text="{}")]),
+                    finish_reason="STOP",
+                )
+            ]
+        )
+        with (
+            patch.dict(
+                "os.environ",
+                {"GEMINI_API_KEY": "fictional", "GOOGLE_GENAI_USE_VERTEXAI": "false"},
+            ),
+            patch("langchain_google_genai.chat_models.Client") as client,
+        ):
+            client.return_value.models.generate_content.return_value = provider_response
+            value = model_boundary.chat(
+                [{"role": "user", "content": "Hello"}],
+                response_schema=CoordinatorAction.model_json_schema(),
+            )
+        self.assertEqual(value, "{}")
+        request = client.return_value.models.generate_content.call_args.kwargs
+        self.assertEqual(request["config"].response_mime_type, "application/json")
+        self.assertIn("properties", request["config"].response_json_schema)
+
+    def test_wrapped_provider_errors_keep_status_without_exposing_body(self):
+        cause = RuntimeError("private provider response")
+        cause.code = 429
+        wrapped = RuntimeError("wrapped private request")
+        wrapped.__cause__ = cause
+        with patch.object(
+            model_boundary, "ChatGoogleGenerativeAI", side_effect=wrapped
+        ):
+            value = model_boundary._invoke_model(
+                [], 0, 512, time.monotonic() + 10, None
+            )
+        self.assertEqual(value.status_code, 429)
+        self.assertNotIn("private", value)
 
     def test_truncated_and_blocked_generations_never_parse_as_complete(self):
-        with execution.execution_scope():
-            self.assertIn("output_truncated", runner._response_text({"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": "{}"}]}}]}))
-            self.assertIn("generation_blocked", runner._response_text({"candidates": [{"finishReason": "SAFETY"}]}))
+        with (
+            patch.object(model_boundary, "ChatGoogleGenerativeAI") as factory,
+            execution.execution_scope(),
+        ):
+            invoke = factory.return_value.bind.return_value.invoke
+            invoke.return_value = AIMessage(
+                content="{}", response_metadata={"finish_reason": "MAX_TOKENS"}
+            )
+            result = model_boundary._invoke_model(
+                [], 0, 512, time.monotonic() + 10, None
+            )
+            self.assertIn("output_truncated", result)
+            invoke.return_value = AIMessage(
+                content="{}", response_metadata={"finish_reason": "SAFETY"}
+            )
+            self.assertIn(
+                "generation_blocked",
+                model_boundary._invoke_model([], 0, 512, time.monotonic() + 10, None),
+            )
             self.assertEqual(execution.events()[0]["finish_reason"], "MAX_TOKENS")
 
-    def test_api_transport_retries_truncation_with_larger_budget(self):
-        class Response:
-            def __init__(self, reason, text):
-                self.value = {"candidates": [{"finishReason": reason, "content": {"parts": [{"text": text}]}}]}
-            def __enter__(self): return self
-            def __exit__(self, *args): pass
-            def read(self): return json.dumps(self.value).encode()
-        with patch.object(runner, "GEMINI_API_KEY", "synthetic"), patch.object(runner.urllib.request, "urlopen", side_effect=[Response("MAX_TOKENS", "{"), Response("STOP", "{}")]) as request:
-            self.assertEqual(runner.gemini_chat([], max_tokens=512), "{}")
-        first, second = [json.loads(call.args[0].data)["generationConfig"]["maxOutputTokens"] for call in request.call_args_list]
-        self.assertEqual((first, second), (512, 1024))
+    def test_langchain_transport_retries_truncation_with_larger_budget(self):
+        with patch.object(
+            model_boundary,
+            "_invoke_model",
+            side_effect=["<<LLM_ERROR: output_truncated>>", "{}"],
+        ) as invoke:
+            self.assertEqual(model_boundary.chat([], max_tokens=512), "{}")
+        self.assertEqual([call.args[2] for call in invoke.call_args_list], [512, 1024])
 
     def test_request_deadline_is_isolated_and_stops_new_calls(self):
-        with execution.execution_scope(-1), patch.object(runner, "vertex_deadline_chat") as provider:
-            self.assertIn("deadline", runner.gemini_chat([]))
+        with (
+            execution.execution_scope(-1),
+            patch.object(model_boundary, "_invoke_model") as provider,
+        ):
+            self.assertIn("deadline", model_boundary.chat([]))
             provider.assert_not_called()
         self.assertIsNone(execution.deadline())
 
@@ -108,9 +198,9 @@ class HarnessTests(unittest.TestCase):
         finish = action("finish", answer="Booth 1, Booth 2", evidence_task_ids=["t1"])
         with patch.object(runner, "gemini_chat", side_effect=[action("delegate", tasks=[assignment.model_dump()]), finish, finish]), patch("agents.runtime.run_specialist", return_value=result):
             response = runner.run_local_agent("Top regions where BJP was ahead in 2024", "allahabad-south")
-        self.assertEqual(response["status"], "partial")
+        self.assertEqual(response["status"], "needs_clarification")
         self.assertNotIn("Booth 1", response["answer"])
-        self.assertTrue(any(event.get("event") == "coordinator_rejected" for event in response["diagnostics"]))
+        self.assertIn("narrow", response["answer"])
 
     def test_invalid_rankings_are_rejected(self):
         for rows in ([["A", 100, "B", 90, 50]], [["A", 200, "B", 150, 50], ["C", 400, "D", 100, 300]],
@@ -182,7 +272,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(infer_requirements("history of this constituency").intent, "public_history")
         self.assertEqual(infer_requirements("history of election results").intent, "electoral_history")
 
-    def test_specialist_repairs_its_own_invalid_ranking(self):
+    def test_specialist_returns_executed_ranking_for_coordinator_to_assess(self):
         req, assignment, _ = self.ranking()
         with tempfile.TemporaryDirectory() as root:
             seat = Path(root) / "seat"
@@ -191,13 +281,12 @@ class HarnessTests(unittest.TestCase):
                 connection.execute("CREATE TABLE form20_2024_lok(area TEXT, votes INTEGER)")
                 connection.execute("INSERT INTO form20_2024_lok VALUES('North',400)")
             invalid = "SELECT area AS geography_name,votes AS party_votes,'Opponent' AS opponent_name,100 AS opponent_votes,999 AS margin FROM form20_2024_lok"
-            valid = invalid.replace("999 AS margin", "300 AS margin")
-            replies = [action("sql", sql=invalid), action("finish"), action("sql", sql=valid), action("finish")]
+            replies = [action("sql", sql=invalid), action("finish")]
             with patch.object(get_settings(), "local_data_root", root), patch.object(runner, "gemini_chat", side_effect=replies) as model:
                 result = sql_specialist(assignment, "seat", {}, runner)
             self.assertEqual(result.status, "complete")
-            self.assertEqual(result.facts[-1]["rows"][0][-1], 300)
-            self.assertIn("must equal", model.call_args_list[2].args[0][1]["content"])
+            self.assertEqual(result.facts[-1]["rows"][0][-1], 999)
+            self.assertEqual(model.call_count, 2)
 
     def test_expired_deadline_interrupts_sql(self):
         with closing(sqlite3.connect(":memory:")) as connection, execution.execution_scope(-1):
@@ -205,13 +294,13 @@ class HarnessTests(unittest.TestCase):
             with self.assertRaises(sqlite3.OperationalError):
                 connection.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT SUM(x) FROM n").fetchone()
 
-    def test_failed_synthesis_recovers_verified_ranking(self):
+    def test_failed_synthesis_withholds_incomplete_ranking(self):
         _, assignment, result = self.ranking()
         with patch.object(runner, "gemini_chat", side_effect=[action("delegate", tasks=[assignment.model_dump()]), "<<LLM_ERROR: deadline_exceeded>>"]), patch("agents.runtime.run_specialist", return_value=result):
             response = runner.run_local_agent("Top regions where BJP was ahead in 2024", "allahabad-south")
-        self.assertEqual(response["status"], "partial")
-        self.assertIn("margin 300", response["answer"])
-        self.assertIn("verified partial", response["answer"])
+        self.assertEqual(response["status"], "needs_clarification")
+        self.assertNotIn("margin 300", response["answer"])
+        self.assertIn("narrow", response["answer"])
 
     def test_no_verified_findings_can_finish_honestly_without_retry_loop(self):
         assignment = task("research", research_query={"public_question": "Historical background of Allahabad South"})
@@ -220,9 +309,10 @@ class HarnessTests(unittest.TestCase):
         with patch.object(runner, "gemini_chat", side_effect=[action("delegate", tasks=[assignment.model_dump()]),
                 action("finish", answer="The retrieved sources did not establish a reliable historical account.", status="partial")]) as model, patch("agents.runtime.run_specialist", return_value=result):
             response = runner.run_local_agent("History of this constituency", "allahabad-south")
-        self.assertEqual(response["status"], "partial")
+        self.assertEqual(response["status"], "needs_clarification")
         self.assertEqual(model.call_count, 2)
-        self.assertIn("did not establish", response["answer"])
+        self.assertNotIn("retrieved sources", response["answer"])
+        self.assertIn("narrow", response["answer"])
 
     def test_invalid_contract_gets_one_targeted_repair(self):
         invalid = action("clarify", answer="Which election year?", answer_requirements={"limit": 0})
@@ -241,15 +331,17 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(response["status"], "complete")
         self.assertIn("inspect available election", model.call_args_list[1].args[0][1]["content"])
 
-    def test_server_downgrade_explains_the_observed_gap(self):
+    def test_server_downgrade_withholds_partial_result(self):
         assignment = task()
         observation = SpecialistResult(task_id="t1", agent="history", status="partial",
             facts=[{"total": 3}], gaps=["The 2022 results could not be verified; only 2024 is covered."])
         with patch.object(runner, "gemini_chat", side_effect=[action("delegate", tasks=[assignment.model_dump()]),
                 action("finish", answer="Three results are available.", evidence_task_ids=["t1"])]), patch("agents.runtime.run_specialist", return_value=observation):
             response = runner.run_local_agent("Compare 2022 and 2024 results", "allahabad-south")
-        self.assertEqual(response["status"], "partial")
-        self.assertEqual(response["partial_reason"], observation.gaps[0])
+        self.assertEqual(response["status"], "needs_clarification")
+        self.assertNotIn("Three results", response["answer"])
+        self.assertIsNone(response["partial_reason"])
+        self.assertIn("narrow", response["answer"])
 
     def test_partial_explanation_handles_timeouts_and_hides_diagnostics(self):
         self.assertIn("time limit", partial_reason("", {}, "deadline_exceeded"))
@@ -329,8 +421,32 @@ class HarnessTests(unittest.TestCase):
                    action("finish", status="partial", answer="I could not determine the matching booth count.", evidence_task_ids=["t1"])]
         with patch.object(runner, "gemini_chat", side_effect=replies), patch("agents.runtime.run_specialist", return_value=result):
             response = runner.run_local_agent("Count matching booths across the constituency", "allahabad-south")
-        self.assertIn("could not determine", response["answer"])
+        self.assertEqual(response["status"], "needs_clarification")
         self.assertNotIn("No booths", response["answer"])
+
+    def test_fallback_never_shows_intermediate_sql_rows(self):
+        assignment = task("voter")
+        result = SpecialistResult(task_id="t1", agent="voter", status="partial",
+            facts=[{"columns": ["region"], "rows": [["Private intermediate row"]], "truncated": True}])
+        with patch.object(runner, "gemini_chat", side_effect=[
+            action("delegate", tasks=[assignment.model_dump()]), "<<LLM_ERROR: deadline_exceeded>>"
+        ]), patch("agents.runtime.run_specialist", return_value=result):
+            response = runner.run_local_agent("list all unique regions", "allahabad-south")
+        self.assertEqual(response["status"], "needs_clarification")
+        self.assertNotIn("Private intermediate row", response["answer"])
+        self.assertNotIn("columns", response["answer"])
+
+    def test_failed_final_answer_with_evidence_does_not_show_rows(self):
+        assignment = task("voter")
+        result = SpecialistResult(task_id="t1", agent="voter", status="complete",
+            facts=[{"columns": ["region"], "rows": [["Private intermediate row"]]}])
+        with patch.object(runner, "gemini_chat", side_effect=[
+            action("delegate", tasks=[assignment.model_dump()]),
+            action("finish", status="failed", answer="Private intermediate row was found.", evidence_task_ids=["t1"]),
+        ]), patch("agents.runtime.run_specialist", return_value=result):
+            response = runner.run_local_agent("Find regions", "allahabad-south")
+        self.assertEqual(response["status"], "needs_clarification")
+        self.assertNotIn("Private intermediate row", response["answer"])
 
     def test_final_aggregate_excludes_truncated_exploration(self):
         with tempfile.TemporaryDirectory() as root:

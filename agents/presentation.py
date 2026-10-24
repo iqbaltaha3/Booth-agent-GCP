@@ -26,3 +26,30 @@ def partial_reason(proposed, results, terminal, hindi=False):
     if any(f.get("truncated") for r in partial for f in r.get("facts", [])):
         return "मिलते हुए परिणामों का केवल एक हिस्सा उपलब्ध है; पूरी सूची शामिल नहीं है।" if hindi else "Only part of the matching results was returned; the full list is not included."
     return "उपलब्ध जानकारी से आपके प्रश्न के सभी विवरण सत्यापित नहीं हो पाए।" if hindi else "The available records and sources did not verify all the details you requested."
+
+
+def recovery_question(question, hindi=False):
+    """Ask for a narrower request without exposing unfinished observations."""
+    if re.search(r"\b(?:unique|distinct)\b.*\b(?:regions?|booths?)\b", question, re.I):
+        return (
+            "मैं पूरी सूची की पुष्टि नहीं कर पाया। क्या आप किसी एक इलाके या नाम के शुरुआती अक्षर तक सूची सीमित कर सकते हैं?"
+            if hindi else
+            "I couldn't verify the full list. Could you narrow it to one area or names beginning with a particular letter?"
+        )
+    if re.search(r"\b(?:percent(?:age)?|share)\b|\d+(?:\.\d+)?\s*%|प्रतिशत", question, re.I):
+        return (
+            "मैं पूरे क्षेत्र की तुलना की पुष्टि नहीं कर पाया। क्या आप एक इलाके या कुछ खास बूथों के लिए पूछ सकते हैं?"
+            if hindi else
+            "I couldn't verify the full percentage comparison. Could you ask about one area or a smaller set of booths?"
+        )
+    if re.search(r"\b(?:history|historical|election|ranking|top|compare)\b|इतिहास|चुनाव", question, re.I):
+        return (
+            "मैं पूरा उत्तर सत्यापित नहीं कर पाया। क्या आप एक चुनाव, साल या इलाके पर सवाल सीमित कर सकते हैं?"
+            if hindi else
+            "I couldn't verify the full answer. Could you narrow it to one election, year, or area?"
+        )
+    return (
+        "मैं पूरा उत्तर सत्यापित नहीं कर पाया। क्या आप एक खास व्यक्ति, जगह या आँकड़े के बारे में फिर से पूछ सकते हैं?"
+        if hindi else
+        "I couldn't verify a complete answer. Could you ask about one specific person, place, or measure?"
+    )
