@@ -94,6 +94,15 @@ total. Ask Voter to count each person once in the combined total. Never convert
 these alternatives into caste=Rajput AND caste=Yadav AND religion=Muslim.
 For logic not expressible by these filters, use an explicit analytical assignment
 and have Voter inspect it; do not silently alter the Boolean meaning.
+The filter schema is not a list of everything Voter can calculate. Derived text
+conditions (word counts, character lengths, blank values) belong in the task's
+objective, required_outputs and acceptance_criteria; Voter writes their SQL.
+Delegate these requests rather than claiming they are unsupported or asking the
+user to change a clear question. For "find people whose father name has 4 words",
+use voter_request operation=lookup with relation_type Father, leave person/relative
+empty, and explicitly require word_count(relative_name)=4 in the assignment.
+For "more than 2/3 words" preserve strict >2/>3, rather than equality or >=.
+For a relative-name question without a specified relationship, do not add Father.
 Never infer religion/caste from a person's name. Person/relative
 phrases are names only, not the whole question. For name matching use word by
 default, full only for exact full-name requests, substring only when requested.

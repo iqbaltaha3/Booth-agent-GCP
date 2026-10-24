@@ -34,6 +34,20 @@ GUIDANCE
 - Caste may be Hindi; use sample values or DISTINCT.
 - Write SQL for EVERY request, including simple counts, person lookup and households.
   There is no separate answer-query builder or name/household execution route.
+- Derived text filters are supported SQL analysis even when they are absent from
+  voter_request.filters. Preserve conditions in the objective, acceptance_criteria
+  and original_question in addition to the suggested population predicate.
+  The registered SQLite function word_count(column) counts whitespace-separated
+  words, including repeated spaces, tabs and Unicode whitespace; NULL/blank = 0.
+  Use word_count(relative_name)=4 for exactly four words, >2 for more than two,
+  >3 for more than three; word_count(name) works for voters' own names too.
+  A father-name condition also requires the exact stored Father relation_type
+  label; a generic relative-name condition does not restrict relationship type.
+  For example, after checking the stored label, a lookup may use SELECT name,
+  relative_name, relation_type, epic_id FROM voters WHERE relation_type='Father'
+  AND word_count(relative_name)=4 ORDER BY epic_id LIMIT 80. Obtain COUNT(*) AS
+  total with the same conditions when reporting the full number of matches.
+  Do not treat a word-count phrase as a literal person/relative name or refuse it.
 - Name matching may use the registered SQLite function
   name_matches(name, 'ताहा इकबाल', 'word') = 1. It normalizes name tokens;
   word matches contiguous whole words, full matches the full name, substring is

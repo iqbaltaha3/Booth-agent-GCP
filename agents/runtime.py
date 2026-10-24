@@ -51,7 +51,7 @@ from agents.completion import (
     whole_constituency,
     source_policy,
 )
-from agents.name_matching import resolve_booth, AmbiguousInput
+from agents.name_matching import resolve_booth, AmbiguousInput, word_count
 from agents.households import remember_voters, data_version
 from agents.research import (
     research_specialist,
@@ -102,6 +102,8 @@ def sql_specialist(task, slug, meta, runner, question=""):
     result = SpecialistResult(task_id=task.task_id, agent=task.agent, status="failed")
     try:
         with closing(runner.gcs_data.open_sqlite(slug, filename)) as conn:
+            if task.agent == "voter":
+                conn.create_function("word_count", 1, word_count, deterministic=True)
             schema = []
             for table in runner.gcs_data.list_tables(conn):
                 columns = runner.gcs_data.list_columns(conn, table)

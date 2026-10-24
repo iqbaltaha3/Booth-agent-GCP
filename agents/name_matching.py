@@ -10,6 +10,11 @@ from agents.households import normalized_station
 from agents.station_matching import AmbiguousInput, station_clarification
 
 
+def word_count(value: str | None) -> int:
+    """Count whitespace-separated words; missing/blank roll values have none."""
+    return len(str(value or "").split())
+
+
 def tokens(value: str) -> list[str]:
     # Electoral rolls commonly vary only in whether Devanagari nukta is encoded
     # (फ़/फ, क़/क). Treat those forms alike while preserving word boundaries.

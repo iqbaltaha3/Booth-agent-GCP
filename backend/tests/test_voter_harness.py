@@ -260,6 +260,47 @@ class VoterHarnessTests(unittest.TestCase):
         self.assertIsNone(result.failure_code)
         self.assertEqual([fact['rows'] for fact in result.facts], [[[5]], [[3]]])
 
+    def test_derived_name_word_filters_execute_through_specialist(self):
+        # Deliberately include spouse names, punctuation, different scripts and
+        # irregular whitespace so counting spaces or ignoring relation fails.
+        samples = [
+            ('TEST1', 'राम कुमार सिंह यादव', 'Father'),
+            ('TEST2', '  राम\tकुमार  सिंह\u00a0यादव  ', 'Father'),
+            ('TEST3', 'Ram Kumar Singh Yadav', 'Husband'),
+            ('TEST4', 'राम कुमार सिंह', 'Father'),
+            ('TEST5', 'राम-कुमार सिंह', 'Father'),
+            ('WORDS6', None, 'Father'),
+            ('WORDS7', ' \t\n ', 'Father'),
+        ]
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute('DELETE FROM voters')
+            connection.executemany(
+                'INSERT INTO voters(epic_id,relative_name,relation_type) VALUES(?,?,?)', samples)
+        for comparison, relation, expected in [
+            ('=4', True, ['TEST1', 'TEST2']),
+            ('>2', True, ['TEST1', 'TEST2', 'TEST4']),
+            ('>3', True, ['TEST1', 'TEST2']),
+            ('>3', False, ['TEST1', 'TEST2', 'TEST3']),
+        ]:
+            with self.subTest(comparison=comparison, father_only=relation):
+                request = {'operation': 'lookup', 'filters':
+                           [{'field': 'relation_type', 'value': 'Father'}] if relation else []}
+                assignment = task(request)
+                assignment.objective = f'Find voters with relative names satisfying word_count(relative_name){comparison}'
+                predicate = f'word_count(relative_name){comparison}'
+                if relation:
+                    predicate += " AND relation_type='Father'"
+                replies = [
+                    {'action': 'sql', 'sql': f'SELECT COUNT(*) AS total FROM voters WHERE {predicate}'},
+                    {'action': 'sql', 'sql': f'SELECT epic_id, relative_name FROM voters WHERE {predicate} ORDER BY epic_id LIMIT 80'},
+                    {'action': 'finish', 'status': 'complete'},
+                ]
+                with patch.object(runner, 'gemini_chat', side_effect=[json.dumps(r) for r in replies]):
+                    result = run_specialist(assignment, 'seat', {}, runner, {}, assignment.objective)
+                self.assertEqual(result.status, 'complete', result.errors)
+                self.assertEqual(result.facts[0]['total'], len(expected))
+                self.assertEqual([r['epic_id'] for r in result.facts[1]['records']], expected)
+
     def test_percentage_uses_all_voters_denominator_without_a_task_filter(self):
         assignment = task({'operation': 'aggregate'})
         replies = [
