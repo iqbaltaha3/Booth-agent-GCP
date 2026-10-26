@@ -260,7 +260,7 @@ async function voterSearchFetch<T>(path: string, token: string | null, signal: A
   });
   if (!res.ok) {
     const error = await res.json().catch(() => ({}));
-    const code = error.error_code || (res.status === 401 ? "unauthorized" : res.status === 403 ? "forbidden" : res.status === 422 ? "invalid_input" : "search_unavailable");
+    const code = error.error_code || (res.status === 401 ? "unauthorized" : res.status === 403 ? "forbidden" : res.status === 404 ? "api_version_unavailable" : res.status === 422 ? "invalid_input" : "search_unavailable");
     throw new VoterSearchError(code, error.request_id);
   }
   return res.json();

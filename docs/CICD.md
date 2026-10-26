@@ -17,6 +17,12 @@ The backend runs the LangGraph harness in-process. Gemini access uses LangChain'
 Google integration with API keys or runtime service-account credentials. There is
 no separate agent deployment step.
 
+Each build uses its own image tag and revision suffix based on `BUILD_ID`.
+After creating a revision, the pipeline explicitly routes traffic to that exact
+revision. Cloud Run services pinned to an older named revision otherwise keep
+serving it even when a new deployment reports success. Backend pipelines also
+check the live OpenAPI schema for the Find Voter routes before proceeding.
+
 ## Backend prerequisites
 
 - A private artifact bucket with per-constituency folders.

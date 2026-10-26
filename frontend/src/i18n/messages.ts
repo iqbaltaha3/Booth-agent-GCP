@@ -128,6 +128,7 @@ export const voterMessages = {
     tiers: { epic_exact: "Exact EPIC match", all_details: "All entered details match", partial_name: "Possible match — name words or spelling variant", partial_details: "Possible match — some details differ", single_name: "Possible match — single-name search" },
     statuses: { exact: "matches", name_words: "name words match", spelling_variant: "Hindi spelling variant matches", different: "differs", not_recorded: "not recorded" },
     errors: {
+      api_version_unavailable: "The voter search API is not available on the deployed backend. Please try again after the service update.",
       invalid_input: "Enter EPIC alone, two identifying details, or a name and a specific booth.",
       invalid_name: "Enter a name containing letters or numbers.", invalid_epic: "Enter a complete EPIC number.",
       invalid_region: "Choose an available region.", invalid_booth: "Choose a valid booth.",
@@ -173,6 +174,7 @@ export const voterMessages = {
     tiers: { epic_exact: "EPIC का सटीक मिलान", all_details: "सभी भरे गए विवरण मेल खाते हैं", partial_name: "संभावित मिलान — नाम के शब्द या वर्तनी", partial_details: "संभावित मिलान — कुछ विवरण अलग हैं", single_name: "संभावित मिलान — एक नाम से खोज" },
     statuses: { exact: "मेल खाता है", name_words: "नाम के शब्द मेल खाते हैं", spelling_variant: "हिंदी वर्तनी मेल खाती है", different: "अलग है", not_recorded: "दर्ज नहीं है" },
     errors: {
+      api_version_unavailable: "तैनात बैकएंड पर मतदाता खोज API उपलब्ध नहीं है। सेवा अपडेट के बाद फिर प्रयास करें।",
       invalid_input: "केवल EPIC, दो पहचान विवरण, या एक नाम और निश्चित बूथ भरें।",
       invalid_name: "अक्षरों या अंकों वाला नाम भरें।", invalid_epic: "पूरी EPIC संख्या भरें।",
       invalid_region: "उपलब्ध क्षेत्र चुनें।", invalid_booth: "सही बूथ चुनें।",

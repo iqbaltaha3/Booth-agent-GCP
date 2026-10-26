@@ -13,7 +13,7 @@ steps:
     args:
       - build
       - -t
-      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:$BUILD_ID
       - -f
       - backend/Dockerfile
       - .
@@ -21,7 +21,7 @@ steps:
     name: gcr.io/cloud-builders/docker
     args:
       - push
-      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
+      - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:$BUILD_ID
   - id: deploy-backend
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
@@ -29,7 +29,8 @@ steps:
       - run
       - deploy
       - booth-backend
-      - --image=asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
+      - --image=asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:$BUILD_ID
+      - --revision-suffix=build-$BUILD_ID
       - --region=asia-south1
       - --platform=managed
       - --allow-unauthenticated
@@ -39,7 +40,27 @@ steps:
       - --timeout=600
       - --update-env-vars=ENV=dev,REGION=asia-south1,LOCAL_DEV_AUTH=true,GCS_DATA_BUCKET=booth-agent-data-dev,GEMINI_MODEL=gemini-2.5-flash,CONSTITUENCIES_MANIFEST_PATH=/constituencies/manifest.json
       - --update-secrets=TAVILY_API_KEY=tavily-api-key:latest
+  - id: route-backend
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update-traffic
+      - booth-backend
+      - --region=asia-south1
+      - --to-revisions=booth-backend-build-$BUILD_ID=100
+
+  - id: verify-backend
+    name: python:3.11-slim
+    entrypoint: python
+    args:
+      - scripts/verify_backend_deployment.py
+      - $_BACKEND_API_URL
+
 images:
-  - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:latest
+  - asia-south1-docker.pkg.dev/$PROJECT_ID/booth-agent/booth-backend:$BUILD_ID
+substitutions:
+  _BACKEND_API_URL: https://booth-backend-168028165100.asia-south1.run.app
 options:
   logging: CLOUD_LOGGING_ONLY
