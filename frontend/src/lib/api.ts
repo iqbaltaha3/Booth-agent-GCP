@@ -188,3 +188,88 @@ export async function synthesizeSpeech(
   if (!res.ok) throw new Error(`TTS failed (${res.status})`);
   return res.blob();
 }
+
+export type VoterSearchCoverage = {
+  availability: "available" | "unavailable" | "unknown";
+  completeness: "partial" | "declared" | "unverified";
+};
+
+export type VoterSearchOptions = {
+  constituency_id: string;
+  coverage: VoterSearchCoverage;
+  regions: string[];
+  booths: {
+    booth_id: string;
+    part_number: string;
+    booth_name: string;
+    region: string;
+    mapping_status: "mapped" | "unmapped" | "ambiguous";
+  }[];
+  source_version: string | null;
+  booth_list_available: boolean;
+};
+
+export type VoterSearchMode = "standard" | "name_only" | "relative_only";
+export type VoterSearchField = "name" | "relative_name" | "house_no" | "epic_id";
+export type VoterMatchStatus = "exact" | "name_words" | "spelling_variant" | "different" | "not_recorded";
+export type VoterSearchRequest = Record<VoterSearchField, string> & {
+  constituency_id: string;
+  region: string | null;
+  booth_id: string | null;
+  search_mode: VoterSearchMode;
+  spelling_assistance: boolean;
+};
+export type VoterCandidate = {
+  record_id: string;
+  voter: Record<VoterSearchField | "serial_no" | "relation_type" | "age" | "gender" | "region" | "polling_station", string | null>;
+  booth_id: string | null;
+  match_tier: "epic_exact" | "all_details" | "partial_name" | "partial_details" | "single_name";
+  field_matches: Partial<Record<VoterSearchField, VoterMatchStatus>>;
+  matched_fields: number;
+  supplied_fields: number;
+};
+export type VoterSearchResponse = {
+  constituency_id: string;
+  region: string | null;
+  booth_id: string | null;
+  coverage: VoterSearchCoverage;
+  source_version: string | null;
+  outcome: "matches" | "no_matches" | "refine_search" | "unavailable";
+  candidates: VoterCandidate[];
+  truncated: boolean;
+  duplicate_epic: boolean;
+  suggested_modes: Exclude<VoterSearchMode, "standard">[];
+  spelling_status: "not_requested" | "used" | "unavailable" | "not_needed";
+  spelling_variants: Partial<Record<VoterSearchField, string[]>>;
+  request_id: string;
+};
+
+export class VoterSearchError extends Error {
+  constructor(public code: string, public requestId?: string) {
+    super(code);
+  }
+}
+
+async function voterSearchFetch<T>(path: string, token: string | null, signal: AbortSignal, body?: VoterSearchRequest): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    method: body ? "POST" : "GET",
+    headers: await authHeader(token),
+    body: body ? JSON.stringify(body) : undefined,
+    signal,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    const code = error.error_code || (res.status === 401 ? "unauthorized" : res.status === 403 ? "forbidden" : res.status === 422 ? "invalid_input" : "search_unavailable");
+    throw new VoterSearchError(code, error.request_id);
+  }
+  return res.json();
+}
+
+export function getVoterSearchOptions(constituencyId: string, token: string | null, signal: AbortSignal) {
+  return voterSearchFetch<VoterSearchOptions>(`/voter/search-options?constituency_id=${encodeURIComponent(constituencyId)}`, token, signal);
+}
+
+export function findVoters(body: VoterSearchRequest, token: string | null, signal: AbortSignal) {
+  return voterSearchFetch<VoterSearchResponse>("/voter/search", token, signal, body);
+}

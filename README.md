@@ -5,6 +5,10 @@ prepared booth reports and public research. The backend uses **LangGraph** for
 agent orchestration and **LangChain** for Gemini model calls. FastAPI serves the
 API; the Next.js frontend uses `POST /agent/chat`.
 
+The **Find Voter** tab provides direct EPIC lookup and structured multi-field
+search with explicit mismatch explanations, region/booth scope, and coverage
+notices. See [voter search](docs/VOTER_SEARCH.md) for matching rules and limits.
+
 ## Runtime
 
 ```text

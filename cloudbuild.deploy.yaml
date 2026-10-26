@@ -2,6 +2,8 @@ steps:
   - id: test-backend
     name: python:3.11-slim
     entrypoint: sh
+    env:
+      - LOCAL_DATA_ROOT=/tmp/booth-agent-offline-test-data
     args:
       - -c
       - pip install --no-cache-dir -r backend/requirements-dev.txt && PYTHONPATH=backend:. python -m unittest discover -s backend/tests -v

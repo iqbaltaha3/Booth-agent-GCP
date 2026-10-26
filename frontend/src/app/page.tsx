@@ -9,6 +9,7 @@ import {
 } from "firebase/auth";
 import Logo from "@/components/Logo";
 import LangToggle from "@/components/LangToggle";
+import VoterSearchTab from "@/components/VoterSearchTab";
 import { getFirebaseAuth, isDemoMode } from "@/lib/firebase";
 import {
   listConstituencies,
@@ -60,7 +61,7 @@ function shareableAnswer(message: Msg) {
 }
 
 type Screen = "login" | "select" | "chat";
-type WorkspaceTab = "chat" | "reports";
+type WorkspaceTab = "chat" | "reports" | "voters";
 
 type ReportData = Record<string, unknown>;
 
@@ -796,16 +797,16 @@ export default function HomePage() {
   return (
     <div className="flex h-screen flex-col bg-surface">
       <header className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-white px-3 py-2.5">
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           <button
             type="button"
             onClick={() => setScreen("select")}
-            className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"
+            className="shrink-0 rounded-lg p-2 text-slate-500 hover:bg-slate-100"
             aria-label={t(lang, "back")}
           >
             ←
           </button>
-          <div className="rounded-full bg-navy-950 p-1">
+          <div className="shrink-0 rounded-full bg-navy-950 p-1">
             <Logo size={28} />
           </div>
           <div className="min-w-0">
@@ -817,7 +818,7 @@ export default function HomePage() {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <LangToggle lang={lang} onChange={setLang} />
           <button
             type="button"
@@ -829,26 +830,28 @@ export default function HomePage() {
         </div>
       </header>
 
-      <nav className="shrink-0 border-b border-slate-200 bg-white px-3">
+      <nav className="shrink-0 overflow-x-auto border-b border-slate-200 bg-white px-3">
         <div className="mx-auto flex max-w-5xl gap-1">
-          {(["chat", "reports"] as WorkspaceTab[]).map((tab) => (
+          {(["chat", "reports", "voters"] as WorkspaceTab[]).map((tab) => (
             <button
               key={tab}
               type="button"
+              aria-pressed={activeTab === tab}
               onClick={() => setActiveTab(tab)}
-              className={`border-b-2 px-4 py-3 text-sm font-semibold transition ${
+              className={`shrink-0 whitespace-nowrap border-b-2 px-4 py-3 text-sm font-semibold transition ${
                 activeTab === tab
                   ? "border-navy-900 text-navy-950"
                   : "border-transparent text-slate-500 hover:text-slate-900"
               }`}
             >
-              {tab === "chat" ? "Chat" : "Booth Reports"}
+              {tab === "chat" ? "Chat" : tab === "reports" ? "Booth Reports" : t(lang, "findVoter")}
             </button>
           ))}
         </div>
       </nav>
 
-      {activeTab === "chat" ? (
+      {selected && <VoterSearchTab key={selected.slug} constituency={selected} token={token} lang={lang} active={activeTab === "voters"} />}
+      {activeTab === "voters" ? null : activeTab === "chat" ? (
         <>
       <div className="flex-1 overflow-y-auto px-3 py-4">
         {messages.length === 0 && (
